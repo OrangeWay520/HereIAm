@@ -14,7 +14,7 @@ let signaling = null;
 let joinTimer = null;
 let map = null;
 let driverMarker = null; // 司机定位标
-let driverArrow = null; // 司机定位标内的方向箭头元素
+let driverArrowG = null; // 司机定位标内的三角形指针(<g>)
 let myMarker = null; // 好友自己位置
 let myPos = null; // 好友自己坐标(GCJ-02)
 let follow = false; // 是否跟随司机（定位司机模式）
@@ -72,45 +72,44 @@ function initMap() {
 }
 
 // ============================================================
-//  司机定位标：蓝色圆形 + 白色方向箭头（类似地图 App 的定位蓝点）
-//  箭头方向 = 司机行进方向(heading)，0°=正北，顺时针。
-//  静止时 heading 为 null，箭头默认朝上。
+//  司机定位标：高德风格 —— 半透明外晕 + 实心圆 + 中心白点
+//  + 白色三角形指针绕中心旋转指向行进方向(heading)。
+//  静止时(heading 为 null)保持最后已知方向，避免箭头乱转。
 // ============================================================
 function createDriverMarker(pos, heading) {
   const content = document.createElement("div");
-  content.style.cssText =
-    "width:44px;height:44px;position:relative;display:flex;align-items:center;justify-content:center;";
-  // 外圈半透明蓝
-  const ring = document.createElement("div");
-  ring.style.cssText =
-    "position:absolute;inset:0;border-radius:50%;background:rgba(64,158,255,.25);" +
-    "border:2px solid #409EFF;";
-  // 内圈实心蓝
-  const core = document.createElement("div");
-  core.style.cssText =
-    "position:absolute;width:28px;height:28px;border-radius:50%;background:#409EFF;";
-  // 方向箭头
-  const arrow = document.createElement("div");
-  arrow.style.cssText =
-    "position:absolute;font-size:15px;color:#fff;line-height:1;transform:rotate(" +
-    (heading || 0) + "deg);transition:transform .4s ease;";
-  arrow.textContent = "▲";
-  content.appendChild(ring);
-  content.appendChild(core);
-  content.appendChild(arrow);
+  content.style.cssText = "width:48px;height:48px;position:relative;";
+  content.innerHTML =
+    '<svg width="48" height="48" viewBox="0 0 48 48" style="position:absolute;inset:0;">' +
+    // 外圈半透明晕
+    '<circle cx="24" cy="24" r="23" fill="rgba(64,158,255,0.18)" stroke="#409EFF" stroke-width="2"/>' +
+    // 实心圆
+    '<circle cx="24" cy="24" r="15" fill="#409EFF"/>' +
+    // 中心白点（盖在三角底部）
+    '<circle cx="24" cy="24" r="3.6" fill="#fff"/>' +
+    // 三角形指针：尖端朝上(北)，绕中心旋转指向行进方向
+    '<g transform="rotate(' +
+    (heading || 0) +
+    ' 24 24)">' +
+    '<polygon points="24,9 28.5,21 19.5,21" fill="#fff"/>' +
+    "</g>" +
+    "</svg>";
+  content.style.cssText += "filter:drop-shadow(0 1px 3px rgba(0,0,0,.25));";
 
+  const arrowG = content.querySelector("g");
   const marker = new AMap.Marker({
     position: pos,
     content: content,
-    offset: new AMap.Pixel(-22, -22), // 让定位标中心对准坐标点
+    offset: new AMap.Pixel(-24, -24), // 让定位标中心对准坐标点
     zIndex: 120,
   });
-  return { marker, arrow };
+  return { marker, arrowG };
 }
 
+// 更新三角形指针方向；heading 为 null（静止）时保持原方向
 function updateDriverArrow(heading) {
-  if (driverArrow && heading != null) {
-    driverArrow.style.transform = "rotate(" + heading + "deg)";
+  if (driverArrowG && heading != null) {
+    driverArrowG.setAttribute("transform", "rotate(" + heading + " 24 24)");
   }
 }
 
@@ -317,7 +316,7 @@ function onLocation(m) {
   if (!driverMarker) {
     const created = createDriverMarker(pos, m.heading);
     driverMarker = created.marker;
-    driverArrow = created.arrow;
+    driverArrowG = created.arrowG;
     map.add(driverMarker);
   } else {
     driverMarker.setPosition(pos);
