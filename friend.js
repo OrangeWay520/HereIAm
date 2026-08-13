@@ -18,6 +18,17 @@ function setStatus(text, on = false) {
   el.className = "status" + (on ? " on" : "");
 }
 
+// 检测浏览器是否支持 WebGL2：支持则用新版 JS API 2.0（矢量瓦片、新风格），
+// 不支持（如部分 Edge/远程桌面/虚拟机）则自动降级到 1.4.15（栅格瓦片）。
+function canUseWebGL2() {
+  try {
+    const c = document.createElement("canvas");
+    return !!window.WebGL2RenderingContext && !!c.getContext("webgl2");
+  } catch (e) {
+    return false;
+  }
+}
+
 function initMap() {
   const key = CONFIG.amapKey;
   if (!key || key.startsWith("YOUR")) {
@@ -27,18 +38,21 @@ function initMap() {
   }
   // 用「安全密钥」方式加载，无需配置域名白名单（本地 localhost 也能用）
   window._AMapSecurityConfig = { securityJsCode: CONFIG.amapSecurityCode };
+  const useV2 = canUseWebGL2();
   const s = document.createElement("script");
-  // 使用 JS API 1.4.15（经典版）：栅格瓦片、不依赖 WebGL，
-  // 在 Edge/远程桌面/虚拟机等 WebGL2 受限环境下也能正常显示底图。
-  // plugin=AMap.Geocoder 用于逆地理编码（显示"XX路附近"）。
   s.src =
-    "https://webapi.amap.com/maps?v=1.4.15&key=" +
-    key +
-    "&plugin=AMap.Geocoder";
+    "https://webapi.amap.com/maps?v=" +
+    (useV2 ? "2.0" : "1.4.15") +
+    "&key=" +
+    key;
   s.onload = () => {
     // 移除"地图加载中…"占位文字，避免它一直盖在地图上层
     const ph = document.querySelector("#map p");
     if (ph) ph.remove();
+    // 预加载逆地理编码插件（显示"XX路附近"）
+    try {
+      AMap.plugin("AMap.Geocoder", () => {});
+    } catch (e) {}
     // 初始给一个默认视野（北京），避免定位失败时地图停在空白海域
     map = new AMap.Map("map", { zoom: 10, center: [116.397428, 39.90923] });
     map.on("complete", () => setStatus("地图就绪，等待司机连接…"));
@@ -116,9 +130,52 @@ async function handleOffer(offer) {
   setStatus("已应答，正在直连…");
 }
 
+// ============================================================
+//  WGS-84 → GCJ-02 坐标转换（高德/国内地图必须）
+//  浏览器定位返回 WGS-84（国际 GPS 坐标），高德地图使用
+//  GCJ-02（国测局加密坐标）。直接使用会偏移 300-500 米，
+//  必须转换后才能在高德上准确显示。
+//  参考：标准火星坐标转换算法（公开实现）。
+// ============================================================
+function wgs84ToGcj02(lng, lat) {
+  const a = 6378245.0;
+  const ee = 0.00669342162296594323;
+  const outOfChina =
+    lng < 72.004 || lng > 137.8347 || lat < 0.8293 || lat > 55.8271;
+  if (outOfChina) return [lng, lat];
+  const transformLat = (x, y) => {
+    let ret =
+      -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * Math.sqrt(Math.abs(x));
+    ret += ((20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0) / 3.0;
+    ret += ((20.0 * Math.sin(y * Math.PI) + 40.0 * Math.sin((y / 3.0) * Math.PI)) * 2.0) / 3.0;
+    ret += ((160.0 * Math.sin((y / 12.0) * Math.PI) + 320.0 * Math.sin((y * Math.PI) / 30.0)) * 2.0) / 3.0;
+    return ret;
+  };
+  const transformLng = (x, y) => {
+    let ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * Math.sqrt(Math.abs(x));
+    ret += ((20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0) / 3.0;
+    ret += ((20.0 * Math.sin(x * Math.PI) + 40.0 * Math.sin((x / 3.0) * Math.PI)) * 2.0) / 3.0;
+    ret += ((150.0 * Math.sin((x / 12.0) * Math.PI) + 300.0 * Math.sin((x / 30.0) * Math.PI)) * 2.0) / 3.0;
+    return ret;
+  };
+  const radLat = (lat / 180.0) * Math.PI;
+  let magic = Math.sin(radLat);
+  magic = 1 - ee * magic * magic;
+  const sqrtMagic = Math.sqrt(magic);
+  const dLat =
+    (transformLat(lng - 105.0, lat - 35.0) * 180.0) /
+    (((a * (1 - ee)) / (magic * sqrtMagic)) * Math.PI);
+  const dLng =
+    (transformLng(lng - 105.0, lat - 35.0) * 180.0) /
+    ((a / sqrtMagic) * Math.cos(radLat) * Math.PI);
+  return [lng + dLng, lat + dLat];
+}
+
 function onLocation(m) {
   if (!map) return;
-  const pos = new AMap.LngLat(m.lng, m.lat);
+  // 关键：浏览器定位是 WGS-84，高德是 GCJ-02，转换后消除几百米偏移
+  const [lng, lat] = wgs84ToGcj02(m.lng, m.lat);
+  const pos = new AMap.LngLat(lng, lat);
   if (!marker) {
     marker = new AMap.Marker({ position: pos });
     map.add(marker);
@@ -126,12 +183,14 @@ function onLocation(m) {
     marker.setPosition(pos);
   }
   map.setCenter(pos);
+  // 显示位置 + 精度（若司机端传了）
+  const accText = m.acc && m.acc > 0 ? "（精度约 " + m.acc + " 米）" : "";
   if (AMap.Geocoder) {
     const geoc = new AMap.Geocoder();
     geoc.getAddress(pos, (st, r) => {
       if (st === "complete" && r.regeocode) {
         $("#addr").innerHTML =
-          "<b>司机现在在：</b>" + r.regeocode.formattedAddress;
+          "<b>司机现在在：</b>" + r.regeocode.formattedAddress + " " + accText;
       }
     });
   }

@@ -115,12 +115,18 @@ function startLocationStream() {
         const m = {
           lat: pos.coords.latitude,
           lng: pos.coords.longitude,
+          // 附带精度（米），好友端可显示，便于判断误差来源
+          acc: Math.round(pos.coords.accuracy || 0),
           t: Date.now(),
         };
+        const accText =
+          m.acc > 0 ? " · 精度约" + m.acc + "米" : "";
+        setStatus("已连接，正在实时上报位置" + accText, true);
         if (dc && dc.readyState === "open") dc.send(JSON.stringify(m));
       },
       (err) => setStatus("定位失败：" + err.message),
-      { enableHighAccuracy: true, maximumAge: 1000, timeout: 5000 }
+      // 高精度模式 + 尽快返回最新位置：减少缓存导致的偏移
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 8000 }
     );
   } else {
     setStatus("当前浏览器不支持定位");
