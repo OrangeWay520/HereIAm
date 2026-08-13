@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HereIAm · 司机端</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+      background: #f3f5f9; color: #1a1a2e; padding: 16px; min-height: 100vh;
+    }
+    .card {
+      background: #fff; border-radius: 16px; padding: 20px; max-width: 420px;
+      margin: 0 auto 16px; box-shadow: 0 4px 20px rgba(0,0,0,.06);
+    }
+    h1 { font-size: 20px; display: flex; align-items: center; gap: 8px; }
+    .pulse { width: 10px; height: 10px; border-radius: 50%; background: #f43f5e; display: inline-block; }
+    .code { font-size: 34px; font-weight: 700; letter-spacing: 4px; text-align: center; color: #4b3fe3; margin: 12px 0; }
+    .label { font-size: 12px; color: #6b7280; margin-bottom: 4px; }
+    input[type=text] { width: 100%; padding: 10px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; }
+    .btn {
+      width: 100%; padding: 14px; border: none; border-radius: 12px; font-size: 16px;
+      background: #4b3fe3; color: #fff; cursor: pointer; font-weight: 600;
+    }
+    .btn:disabled { background: #c7c7d8; cursor: not-allowed; }
+    .status { margin-top: 12px; font-size: 13px; color: #6b7280; text-align: center; }
+    .status.on { color: #16a34a; font-weight: 600; }
+    .qr { text-align: center; margin-top: 12px; }
+    .qr img { width: 140px; height: 140px; border: 1px solid #e5e7eb; border-radius: 8px; }
+    .hint { font-size: 12px; color: #9ca3af; margin-top: 8px; text-align: center; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1><span class="pulse"></span>HereIAm · 司机端</h1>
+    <p class="hint">在浏览器打开本页（建议手机浏览器），一键开始分享实时位置</p>
+    <div class="label">本次分享口令</div>
+    <div class="code" id="code">------</div>
+    <div class="label">把下面的链接（或口令）发给好友</div>
+    <input type="text" id="link" readonly>
+    <div class="qr"><img id="qrcode" alt="分享二维码"></div>
+    <div style="height:12px"></div>
+    <button class="btn" id="start">开始分享实时位置</button>
+    <div class="status" id="status">点击上方按钮开始</div>
+  </div>
+
+  <script src="https://cdn.ably.com/lib/ably.min-1.2.41.js"></script>
+  <script src="config.js"></script>
+  <script src="signaling.js"></script>
+  <script src="driver.js"></script>
+</body>
+</html>

@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HereIAm · 好友位置</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+      background: #f3f5f9; color: #1a1a2e; min-height: 100vh; display: flex; flex-direction: column;
+    }
+    .top {
+      background: #4b3fe3; color: #fff; padding: 14px 16px; display: flex;
+      align-items: center; justify-content: space-between; gap: 8px;
+    }
+    .top .t { font-size: 15px; font-weight: 600; }
+    .status { font-size: 12px; padding: 4px 10px; border-radius: 999px; background: rgba(255,255,255,.18); }
+    .status.on { background: #22c55e; }
+    #map { flex: 1; min-height: 60vh; width: 100%; }
+    .addr {
+      position: fixed; left: 12px; right: 12px; bottom: 16px; background: #fff;
+      border-radius: 12px; padding: 12px 14px; box-shadow: 0 4px 20px rgba(0,0,0,.12);
+      font-size: 13px; color: #374151;
+    }
+    .addr b { color: #4b3fe3; }
+  </style>
+</head>
+<body>
+  <div class="top">
+    <span class="t">HereIAm · 好友位置</span>
+    <span class="status" id="status">等待连接…</span>
+  </div>
+  <div id="map"><p style="padding:20px;color:#9ca3af">地图加载中…</p></div>
+  <div class="addr" id="addr">司机位置将在这里显示</div>
+
+  <script src="https://cdn.ably.com/lib/ably.min-1.2.41.js"></script>
+  <script src="config.js"></script>
+  <script src="signaling.js"></script>
+  <script src="friend.js"></script>
+</body>
+</html>
