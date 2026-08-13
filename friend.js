@@ -2,6 +2,9 @@
 //  好友端逻辑：接收 P2P 位置，在高德地图上实时显示
 //  位置来自 WebRTC 数据通道（点对点），不经过任何服务器。
 //  打开页面时发送 "join" 通知司机，司机据此建立连接。
+//  功能：
+//   1. 司机位置显示为「圆形 + 方向箭头」实时定位标（随 heading 旋转）
+//   2. 「定位司机」按钮：把司机位置放中心，并按司机-好友距离动态缩放
 // ============================================================
 
 const $ = (id) => document.getElementById(id);
@@ -10,7 +13,11 @@ let dc = null;
 let signaling = null;
 let joinTimer = null;
 let map = null;
-let marker = null;
+let driverMarker = null; // 司机定位标
+let driverArrow = null; // 司机定位标内的方向箭头元素
+let myMarker = null; // 好友自己位置
+let myPos = null; // 好友自己坐标(GCJ-02)
+let follow = false; // 是否跟随司机（定位司机模式）
 
 function setStatus(text, on = false) {
   const el = $("status");
@@ -64,6 +71,134 @@ function initMap() {
   document.head.appendChild(s);
 }
 
+// ============================================================
+//  司机定位标：蓝色圆形 + 白色方向箭头（类似地图 App 的定位蓝点）
+//  箭头方向 = 司机行进方向(heading)，0°=正北，顺时针。
+//  静止时 heading 为 null，箭头默认朝上。
+// ============================================================
+function createDriverMarker(pos, heading) {
+  const content = document.createElement("div");
+  content.style.cssText =
+    "width:44px;height:44px;position:relative;display:flex;align-items:center;justify-content:center;";
+  // 外圈半透明蓝
+  const ring = document.createElement("div");
+  ring.style.cssText =
+    "position:absolute;inset:0;border-radius:50%;background:rgba(64,158,255,.25);" +
+    "border:2px solid #409EFF;";
+  // 内圈实心蓝
+  const core = document.createElement("div");
+  core.style.cssText =
+    "position:absolute;width:28px;height:28px;border-radius:50%;background:#409EFF;";
+  // 方向箭头
+  const arrow = document.createElement("div");
+  arrow.style.cssText =
+    "position:absolute;font-size:15px;color:#fff;line-height:1;transform:rotate(" +
+    (heading || 0) + "deg);transition:transform .4s ease;";
+  arrow.textContent = "▲";
+  content.appendChild(ring);
+  content.appendChild(core);
+  content.appendChild(arrow);
+
+  const marker = new AMap.Marker({
+    position: pos,
+    content: content,
+    offset: new AMap.Pixel(-22, -22), // 让定位标中心对准坐标点
+    zIndex: 120,
+  });
+  return { marker, arrow };
+}
+
+function updateDriverArrow(heading) {
+  if (driverArrow && heading != null) {
+    driverArrow.style.transform = "rotate(" + heading + "deg)";
+  }
+}
+
+// ============================================================
+//  好友自己的位置（用于计算司机-好友距离做动态缩放）
+//  好友可拒绝定位：拒绝则退化为固定缩放
+// ============================================================
+function locateMe() {
+  if (!navigator.geolocation) return;
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      const [lng, lat] = wgs84ToGcj02(pos.coords.longitude, pos.coords.latitude);
+      myPos = new AMap.LngLat(lng, lat);
+      if (!map) return;
+      if (!myMarker) {
+        myMarker = new AMap.Marker({
+          position: myPos,
+          content: '<div style="width:14px;height:14px;border-radius:50%;' +
+            'background:#22c55e;border:2px solid #fff;box-shadow:0 0 4px rgba(0,0,0,.3);"></div>',
+          offset: new AMap.Pixel(-7, -7),
+          zIndex: 110,
+        });
+        map.add(myMarker);
+      } else {
+        myMarker.setPosition(myPos);
+      }
+    },
+    () => {}, // 好友拒绝定位：不显示自己，退化为固定缩放
+    { enableHighAccuracy: true, maximumAge: 0, timeout: 8000 }
+  );
+}
+
+// 两点球面距离（米）
+function distanceM(a, b) {
+  const R = 6371000;
+  const rad = (d) => (d * Math.PI) / 180;
+  const dLat = rad(b.lat - a.lat);
+  const dLng = rad(b.lng - a.lng);
+  const s =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  return 2 * R * Math.asin(Math.sqrt(s));
+}
+
+// 滴滴式：按司机-好友距离动态决定缩放级别
+// 越近 zoom 越大（看得清细节），越远 zoom 越小（看得全路线）
+function zoomForDistance(dist) {
+  if (dist < 100) return 17;
+  if (dist < 300) return 16;
+  if (dist < 600) return 15;
+  if (dist < 1200) return 14;
+  if (dist < 2500) return 13;
+  if (dist < 5000) return 12;
+  if (dist < 10000) return 11;
+  return 10;
+}
+
+// 「定位司机」按钮：切换跟随模式
+function toggleFollow() {
+  follow = !follow;
+  const btn = $("locBtn");
+  btn.classList.toggle("active", follow);
+  $("locTip").classList.toggle("show", follow);
+  if (follow && map) {
+    // 切换时立即把司机位置放中心并更新缩放
+    if (driverMarker) {
+      const p = driverMarker.getPosition();
+      map.setCenter(p);
+      applyZoom();
+    }
+  }
+}
+
+// 跟随模式下按司机-好友距离设置缩放；无好友位置则用固定缩放
+function applyZoom() {
+  if (!map) return;
+  if (myPos && driverMarker) {
+    const dp = driverMarker.getPosition();
+    const dist = distanceM(
+      { lat: dp.lat, lng: dp.lng },
+      { lat: myPos.lat, lng: myPos.lng }
+    );
+    map.setZoom(zoomForDistance(dist));
+  } else {
+    map.setZoom(15);
+  }
+}
+
 async function init() {
   const params = new URLSearchParams(location.search);
   let code = params.get("channel");
@@ -73,6 +208,9 @@ async function init() {
     return;
   }
   initMap();
+  // 获取好友自己位置（可选，用于动态缩放）
+  locateMe();
+  $("locBtn").addEventListener("click", toggleFollow);
 
   signaling = await connectSignaling("hereiam_" + code, onSignal);
   setStatus("等待司机连接…");
@@ -176,13 +314,22 @@ function onLocation(m) {
   // 关键：浏览器定位是 WGS-84，高德是 GCJ-02，转换后消除几百米偏移
   const [lng, lat] = wgs84ToGcj02(m.lng, m.lat);
   const pos = new AMap.LngLat(lng, lat);
-  if (!marker) {
-    marker = new AMap.Marker({ position: pos });
-    map.add(marker);
+  if (!driverMarker) {
+    const created = createDriverMarker(pos, m.heading);
+    driverMarker = created.marker;
+    driverArrow = created.arrow;
+    map.add(driverMarker);
   } else {
-    marker.setPosition(pos);
+    driverMarker.setPosition(pos);
+    updateDriverArrow(m.heading);
   }
-  map.setCenter(pos);
+
+  // 跟随模式下：司机位置放中心 + 按距离动态缩放
+  if (follow) {
+    map.setCenter(pos);
+    applyZoom();
+  }
+
   // 显示位置 + 精度（若司机端传了）
   const accText = m.acc && m.acc > 0 ? "（精度约 " + m.acc + " 米）" : "";
   if (AMap.Geocoder) {

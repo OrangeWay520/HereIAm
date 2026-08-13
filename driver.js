@@ -107,30 +107,48 @@ async function onSignal(msg) {
   }
 }
 
+// 定位失败自动重试（手机在后台/刚打开时容易超时）
 function startLocationStream() {
-  setStatus("已连接，正在实时上报位置", true);
-  if (navigator.geolocation) {
+  if (!navigator.geolocation) {
+    setStatus("当前浏览器不支持定位");
+    return;
+  }
+  let retries = 0;
+  const startWatch = () => {
     watchId = navigator.geolocation.watchPosition(
       (pos) => {
+        retries = 0; // 成功后重置重试计数
         const m = {
           lat: pos.coords.latitude,
           lng: pos.coords.longitude,
+          // 行进方向（0=正北，顺时针），手机移动时才有值；静止为 null
+          heading: pos.coords.heading != null ? Math.round(pos.coords.heading) : null,
           // 附带精度（米），好友端可显示，便于判断误差来源
           acc: Math.round(pos.coords.accuracy || 0),
           t: Date.now(),
         };
-        const accText =
-          m.acc > 0 ? " · 精度约" + m.acc + "米" : "";
+        const accText = m.acc > 0 ? " · 精度约" + m.acc + "米" : "";
         setStatus("已连接，正在实时上报位置" + accText, true);
         if (dc && dc.readyState === "open") dc.send(JSON.stringify(m));
       },
-      (err) => setStatus("定位失败：" + err.message),
+      (err) => {
+        retries++;
+        // 超时/失败后自动重启定位（最多重试 5 次），避免一次超时后永久卡死
+        if (retries <= 5) {
+          setStatus("定位获取中，正在重试(" + retries + "/5)…");
+          try {
+            navigator.geolocation.clearWatch(watchId);
+          } catch (e) {}
+          setTimeout(startWatch, 3000);
+        } else {
+          setStatus("定位失败：" + err.message + "，请检查定位权限");
+        }
+      },
       // 高精度模式 + 尽快返回最新位置：减少缓存导致的偏移
       { enableHighAccuracy: true, maximumAge: 0, timeout: 8000 }
     );
-  } else {
-    setStatus("当前浏览器不支持定位");
-  }
+  };
+  startWatch();
 }
 
 window.addEventListener("beforeunload", () => {

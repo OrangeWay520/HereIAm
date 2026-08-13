@@ -24,6 +24,22 @@
       font-size: 13px; color: #374151;
     }
     .addr b { color: #4b3fe3; }
+    /* 「定位司机」悬浮按钮：类似地图 App 的定位按钮 */
+    .loc-btn {
+      position: fixed; right: 16px; bottom: 84px; width: 48px; height: 48px;
+      border-radius: 50%; border: none; background: #fff; cursor: pointer;
+      box-shadow: 0 2px 10px rgba(0,0,0,.18); display: flex;
+      align-items: center; justify-content: center; z-index: 999;
+    }
+    .loc-btn svg { width: 22px; height: 22px; fill: #4b3fe3; }
+    .loc-btn.active { background: #4b3fe3; }
+    .loc-btn.active svg { fill: #fff; }
+    .loc-tip {
+      position: fixed; right: 16px; bottom: 140px; background: rgba(0,0,0,.7);
+      color: #fff; font-size: 12px; padding: 6px 10px; border-radius: 8px;
+      display: none; z-index: 999; max-width: 200px;
+    }
+    .loc-tip.show { display: block; }
   </style>
 </head>
 <body>
@@ -33,6 +49,10 @@
   </div>
   <div id="map"><p style="padding:20px;color:#9ca3af">地图加载中…</p></div>
   <div class="addr" id="addr">司机位置将在这里显示</div>
+  <button class="loc-btn" id="locBtn" title="定位司机">
+    <svg viewBox="0 0 24 24"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zm8.94 3A8.994 8.994 0 0 0 13 3.06V1h-2v2.06A8.994 8.994 0 0 0 3.06 11H1v2h2.06A8.994 8.994 0 0 0 11 20.94V23h2v-2.06A8.994 8.994 0 0 0 20.94 13H23v-2h-2.06zM12 19a7 7 0 1 1 0-14 7 7 0 0 1 0 14z"/></svg>
+  </button>
+  <div class="loc-tip" id="locTip">已跟随司机，地图将随距离自动缩放</div>
 
   <script src="https://cdn.ably.com/lib/ably.min-1.2.41.js"></script>
   <script src="config.js"></script>
