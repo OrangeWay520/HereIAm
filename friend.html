@@ -24,7 +24,7 @@
       font-size: 13px; color: #374151;
     }
     .addr b { color: #4b3fe3; }
-    /* 「定位司机」悬浮按钮：类似地图 App 的定位按钮 */
+    /* 「定位好友」悬浮按钮：类似地图 App 的定位按钮 */
     .loc-btn {
       position: fixed; right: 16px; bottom: 84px; width: 48px; height: 48px;
       border-radius: 50%; border: none; background: #fff; cursor: pointer;
@@ -48,16 +48,16 @@
     <span class="status" id="status">等待连接…</span>
   </div>
   <div id="map"><p style="padding:20px;color:#9ca3af">地图加载中…</p></div>
-  <div class="addr" id="addr">司机位置将在这里显示</div>
-  <button class="loc-btn" id="locBtn" title="定位司机">
+  <div class="addr" id="addr">好友位置将在这里显示</div>
+  <button class="loc-btn" id="locBtn" title="定位好友">
     <svg viewBox="0 0 24 24"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zm8.94 3A8.994 8.994 0 0 0 13 3.06V1h-2v2.06A8.994 8.994 0 0 0 3.06 11H1v2h2.06A8.994 8.994 0 0 0 11 20.94V23h2v-2.06A8.994 8.994 0 0 0 20.94 13H23v-2h-2.06zM12 19a7 7 0 1 1 0-14 7 7 0 0 1 0 14z"/></svg>
   </button>
-  <div class="loc-tip" id="locTip">已跟随司机，地图将随距离自动缩放</div>
+  <div class="loc-tip" id="locTip">已跟随好友，地图将随距离自动缩放</div>
 
   <script src="https://cdn.ably.com/lib/ably.min-1.2.41.js"></script>
   <!-- 加版本号：防止浏览器/CDN 缓存旧版 JS，更新后强制重新加载 -->
-  <script src="config.js?v=20260814a"></script>
-  <script src="signaling.js?v=20260814a"></script>
-  <script src="friend.js?v=20260814a"></script>
+  <script src="config.js?v=20260814b"></script>
+  <script src="signaling.js?v=20260814b"></script>
+  <script src="friend.js?v=20260814b"></script>
 </body>
 </html>

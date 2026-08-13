@@ -1,10 +1,10 @@
 // ============================================================
 //  好友端逻辑：接收 P2P 位置，在高德地图上实时显示
 //  位置来自 WebRTC 数据通道（点对点），不经过任何服务器。
-//  打开页面时发送 "join" 通知司机，司机据此建立连接。
+//  打开页面时发送 "join" 通知分享者，分享者据此建立连接。
 //  功能：
-//   1. 司机位置显示为「圆形 + 方向箭头」实时定位标（随 heading 旋转）
-//   2. 「定位司机」按钮：把司机位置放中心，并按司机-好友距离动态缩放
+//   1. 分享者位置显示为「圆形 + 方向箭头」实时定位标（随 heading 旋转）
+//   2. 「定位分享者」按钮：把分享者位置放中心，并按分享者-好友距离动态缩放
 // ============================================================
 
 const $ = (id) => document.getElementById(id);
@@ -13,14 +13,14 @@ let dc = null;
 let signaling = null;
 let joinTimer = null;
 let map = null;
-let driverMarker = null; // 司机定位标
-let driverArrowG = null; // 司机定位标内的三角形指针(<g>)
-let driverAvatarImg = null; // 司机定位标内的头像(<image>)
+let driverMarker = null; // 分享者定位标
+let driverArrowG = null; // 分享者定位标内的三角形指针(<g>)
+let driverAvatarImg = null; // 分享者定位标内的头像(<image>)
 let myMarker = null; // 好友自己位置
 let myPos = null; // 好友自己坐标(GCJ-02)
-let follow = false; // 是否跟随司机（定位司机模式）
+let follow = false; // 是否跟随分享者（定位分享者模式）
 
-// 本好友会话的唯一 ID：司机据此区分不同好友，支持多好友同时查看
+// 本好友会话的唯一 ID：分享者据此区分不同好友，支持多好友同时查看
 const friendId =
   Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 
@@ -67,7 +67,7 @@ function initMap() {
     } catch (e) {}
     // 初始给一个默认视野（北京），避免定位失败时地图停在空白海域
     map = new AMap.Map("map", { zoom: 10, center: [116.397428, 39.90923] });
-    map.on("complete", () => setStatus("地图就绪，等待司机连接…"));
+    map.on("complete", () => setStatus("地图就绪，等待好友分享…"));
   };
   s.onerror = () => {
     $("#map").innerHTML =
@@ -77,7 +77,7 @@ function initMap() {
 }
 
 // ============================================================
-//  司机定位标：固定圆盘 + 旋转指针（水滴 = 圆的60°/300°切线围成）
+//  分享者定位标：固定圆盘 + 旋转指针（水滴 = 圆的60°/300°切线围成）
 //  —— 固定层：蓝色圆盘(初始圆内，预留头像位) + 白色圆周线，永不旋转
 //  —— 旋转层：蓝色指针(圆外切线区域) + 白色外轮廓 + 蓝色发散光晕，
 //            绕初始圆圆心整体旋转，指针尖端指向行进方向(heading)
@@ -116,7 +116,7 @@ function createDriverMarker(pos, heading) {
     // ========== 固定层（圆盘 + 白色圆周线，永不旋转，预留头像位）==========
     // 4. 蓝色圆盘（初始圆内区域，后续可放个性化头像）
     '<circle cx="' + M_CX + '" cy="' + M_CY + '" r="' + M_R.toFixed(2) + '" fill="rgba(47,134,246,0.96)"/>' +
-    // 4b. 司机头像（若有则覆盖在圆盘上，圆形裁剪）
+    // 4b. 分享者头像（若有则覆盖在圆盘上，圆形裁剪）
     '<clipPath id="avatarClip"><circle cx="' + M_CX + '" cy="' + M_CY + '" r="' + M_AVATAR_R.toFixed(2) + '"/></clipPath>' +
     '<image id="avatarImg" x="' + (M_CX - M_AVATAR_R).toFixed(2) + '" y="' + (M_CY - M_AVATAR_R).toFixed(2) +
     '" width="' + (M_AVATAR_R * 2).toFixed(2) + '" height="' + (M_AVATAR_R * 2).toFixed(2) +
@@ -137,7 +137,7 @@ function createDriverMarker(pos, heading) {
   return { marker, arrowG, avatarImg };
 }
 
-// 显示司机头像（数据通道推送的 data URL）
+// 显示分享者头像（数据通道推送的 data URL）
 function setDriverAvatar(dataUrl) {
   if (!dataUrl) return;
   if (!driverAvatarImg) return;
@@ -186,7 +186,7 @@ function updateDriverArrow(heading) {
 }
 
 // ============================================================
-//  好友自己的位置（用于计算司机-好友距离做动态缩放）
+//  好友自己的位置（用于计算分享者-好友距离做动态缩放）
 //  好友可拒绝定位：拒绝则退化为固定缩放
 // ============================================================
 function locateMe() {
@@ -226,7 +226,7 @@ function distanceM(a, b) {
   return 2 * R * Math.asin(Math.sqrt(s));
 }
 
-// 滴滴式：按司机-好友距离动态决定缩放级别
+// 滴滴式：按分享者-好友距离动态决定缩放级别
 // 越近 zoom 越大（看得清细节），越远 zoom 越小（看得全路线）
 function zoomForDistance(dist) {
   if (dist < 100) return 17;
@@ -239,14 +239,14 @@ function zoomForDistance(dist) {
   return 10;
 }
 
-// 「定位司机」按钮：切换跟随模式
+// 「定位分享者」按钮：切换跟随模式
 function toggleFollow() {
   follow = !follow;
   const btn = $("locBtn");
   btn.classList.toggle("active", follow);
   $("locTip").classList.toggle("show", follow);
   if (follow && map) {
-    // 切换时立即把司机位置放中心并更新缩放
+    // 切换时立即把分享者位置放中心并更新缩放
     if (driverMarker) {
       const p = driverMarker.getPosition();
       map.setCenter(p);
@@ -255,7 +255,7 @@ function toggleFollow() {
   }
 }
 
-// 跟随模式下按司机-好友距离设置缩放；无好友位置则用固定缩放
+// 跟随模式下按分享者-好友距离设置缩放；无好友位置则用固定缩放
 function applyZoom() {
   if (!map) return;
   if (myPos && driverMarker) {
@@ -284,15 +284,15 @@ async function init() {
   $("locBtn").addEventListener("click", toggleFollow);
 
   signaling = await connectSignaling("hereiam_" + code, onSignal);
-  setStatus("等待司机连接…");
-  // 通知司机有好友加入，司机据此建立 P2P 连接（携带本好友唯一 ID）
-  // 司机可能还没点"开始"（信令通道尚未建立），会收不到这次 join。
+  setStatus("等待好友分享…");
+  // 通知分享者有好友加入，分享者据此建立 P2P 连接（携带本好友唯一 ID）
+  // 分享者可能还没点"开始"（信令通道尚未建立），会收不到这次 join。
   // 因此每 2 秒重发一次 join，直到连接建立为止；断开后也会重启。
   signaling.send({ type: "join", id: friendId });
   startJoinTimer();
 }
 
-// 每 2 秒重发一次 join，直到与司机直连成功
+// 每 2 秒重发一次 join，直到与分享者直连成功
 function startJoinTimer() {
   if (joinTimer) return; // 已有定时器在跑，不重复
   joinTimer = setInterval(() => {
@@ -313,6 +313,20 @@ async function onSignal(msg) {
       try {
         await pc.addIceCandidate(msg.candidate);
       } catch (e) {}
+    }
+  } else if (msg.type === "bye") {
+    // 对方主动结束了共享：停止重连，明确提示（区别于网络断连）
+    setStatus("对方已结束共享，可关闭此页面", false);
+    if (joinTimer) {
+      clearInterval(joinTimer);
+      joinTimer = null;
+    }
+    if (pc) {
+      try {
+        pc.close();
+      } catch (e) {}
+      pc = null;
+      dc = null;
     }
   }
 }
@@ -343,7 +357,7 @@ async function handleOffer(offer) {
       } else if (m && m.type === "loc") {
         onLocation(m);
       } else if (m && m.lat !== undefined) {
-        // 兼容旧版司机端（无 type 字段的纯位置消息）
+        // 兼容旧版分享者端（无 type 字段的纯位置消息）
         onLocation(m);
       }
     };
@@ -355,7 +369,7 @@ async function handleOffer(offer) {
       setStatus("已点对点直连", true);
     } else if (st === "disconnected" || st === "failed") {
       setStatus("连接中断，正在自动重连…");
-      // 司机端也会自动重连；这里同时重启 join 定时器，双保险
+      // 分享者端也会自动重连；这里同时重启 join 定时器，双保险
       startJoinTimer();
     }
   };
@@ -419,7 +433,7 @@ function onLocation(m) {
     driverArrowG = created.arrowG;
     driverAvatarImg = created.avatarImg;
     map.add(driverMarker);
-    // 连接成功后自动把地图焦点移到司机所在区域，不用好友自己找
+    // 连接成功后自动把地图焦点移到分享者所在区域，不用好友自己找
     map.setCenter(pos);
     applyZoom();
   } else {
@@ -427,31 +441,60 @@ function onLocation(m) {
     updateDriverArrow(m.heading);
   }
 
-  // 跟随模式下：司机位置放中心 + 按距离动态缩放
+  // 跟随模式下：分享者位置放中心 + 按距离动态缩放
   if (follow) {
     map.setCenter(pos);
     applyZoom();
   }
 
-  // 显示位置 + 精度（若司机端传了）
+  // 显示位置 + 精度（若分享者端传了）
   const accText = m.acc && m.acc > 0 ? "（精度约 " + m.acc + " 米）" : "";
   if (AMap.Geocoder) {
     const geoc = new AMap.Geocoder();
     geoc.getAddress(pos, (st, r) => {
       if (st === "complete" && r.regeocode) {
         $("#addr").innerHTML =
-          "<b>司机现在在：</b>" + r.regeocode.formattedAddress + " " + accText;
+          "<b>好友现在在：</b>" + r.regeocode.formattedAddress + " " + accText;
       }
     });
   }
 }
 
+// 好友退出：通知对方释放连接。移动端浏览器 beforeunload 不一定可靠，
+// 因此同时监听 pagehide 和页面隐藏，尽量保证 leave 能送达。
+function sendLeave() {
+  if (!signaling) return;
+  try {
+    signaling.send({ type: "leave", id: friendId });
+  } catch (e) {}
+}
 window.addEventListener("beforeunload", () => {
   if (joinTimer) clearInterval(joinTimer);
-  // 通知司机本好友离开，司机立即释放对应连接并更新好友数
-  if (signaling) signaling.send({ type: "leave", id: friendId });
+  sendLeave();
   if (pc) pc.close();
   if (signaling) signaling.close();
 });
+window.addEventListener("pagehide", () => {
+  if (joinTimer) clearInterval(joinTimer);
+  sendLeave();
+  if (pc) pc.close();
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") sendLeave();
+});
+
+// 重连很久仍失败（对方异常退出/断网）：给出明确提示，避免一直转圈
+let reconnectFailCount = 0;
+setInterval(() => {
+  if (pc && pc.connectionState !== "connected") {
+    reconnectFailCount++;
+    if (reconnectFailCount >= 12) {
+      reconnectFailCount = 0;
+      setStatus("对方可能已退出或网络中断，请稍后重试", false);
+    }
+  } else {
+    reconnectFailCount = 0;
+  }
+}, 5000);
 
 init();
