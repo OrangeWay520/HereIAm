@@ -87,22 +87,27 @@ function initMap() {
 //    指针 = 尖顶与两切点围成的三角形（圆外部分），底边与圆相切
 //    白色外轮廓 r_white = 25.5 (=R+W)，圆盘 r_blue = 22 (=R)
 // ============================================================
-const M_R = 22, M_WHITE_BORDER = 3.5;
-const M_R_WHITE = M_R + M_WHITE_BORDER;   // 25.5
-const M_CX = 48;                          // SVG 圆心 X
-const M_CY = 72;                          // SVG 圆心 Y（偏下给指针留空间）
+const M_SCALE = 1 / 3;                    // 整体缩放因子（原尺寸的 1/3，避免在地图上过大）
+const M_R = 22 * M_SCALE;                 // 圆半径 ≈ 7.33
+const M_WHITE_BORDER = 3.5 * M_SCALE;     // 白边宽 ≈ 1.17
+const M_AVATAR_R = M_R - 1.2;             // 头像半径（圆内留白）
+const M_R_WHITE = M_R + M_WHITE_BORDER;   // ≈ 8.5
+const M_CX = 48 * M_SCALE;                // SVG 圆心 X = 16
+const M_CY = 72 * M_SCALE;                // SVG 圆心 Y = 24（偏下给指针留空间）
+const M_SVG_W = 96 * M_SCALE;             // 32
+const M_SVG_H = 120 * M_SCALE;            // 40
 function createDriverMarker(pos, heading) {
   const content = document.createElement("div");
-  content.style.cssText = "width:96px;height:120px;position:relative;";
+  content.style.cssText = "width:" + M_SVG_W + "px;height:" + M_SVG_H + "px;position:relative;";
   content.innerHTML =
-    '<svg width="96" height="120" viewBox="0 0 96 120" style="position:absolute;inset:0;">' +
+    '<svg width="' + M_SVG_W + '" height="' + M_SVG_H + '" viewBox="0 0 ' + M_SVG_W + " " + M_SVG_H + '" style="position:absolute;inset:0;">' +
     '<defs><filter id="glowF" x="-80%" y="-80%" width="260%" height="260%">' +
-    '<feGaussianBlur stdDeviation="2.2"/></filter></defs>' +
+    '<feGaussianBlur stdDeviation="' + (2.2 * M_SCALE).toFixed(2) + '"/></filter></defs>' +
     // ========== 旋转层（指针 + 白色外轮廓 + 蓝色发散光）==========
     // 整个旋转层绕初始圆圆心 M_CX,M_CY 旋转
     '<g id="arrowG" transform="rotate(' + (heading || 0) + " " + M_CX + " " + M_CY + ')">' +
     // 1. 蓝色发散光晕（单层淡蓝 + 模糊，隐隐发散，替代灰色阴影）
-    '<path d="' + buildWaterdropPathD(M_R_WHITE) + '" fill="none" stroke="rgba(47,134,246,0.28)" stroke-width="5" stroke-linejoin="round" filter="url(#glowF)"/>' +
+    '<path d="' + buildWaterdropPathD(M_R_WHITE) + '" fill="none" stroke="rgba(47,134,246,0.28)" stroke-width="' + (5 * M_SCALE).toFixed(2) + '" stroke-linejoin="round" filter="url(#glowF)"/>' +
     // 2. 白色底层水滴（r = R+W = 25.5，外圈白色轮廓，无灰色描边）
     '<path d="' + buildWaterdropPathD(M_R_WHITE) + '" fill="#ffffff"/>' +
     // 3. 蓝色指针（圆外切线区域：尖顶 + 两切点围成的三角形，随旋转层旋转）
@@ -110,14 +115,14 @@ function createDriverMarker(pos, heading) {
     "</g>" +
     // ========== 固定层（圆盘 + 白色圆周线，永不旋转，预留头像位）==========
     // 4. 蓝色圆盘（初始圆内区域，后续可放个性化头像）
-    '<circle cx="' + M_CX + '" cy="' + M_CY + '" r="' + M_R + '" fill="rgba(47,134,246,0.96)"/>' +
+    '<circle cx="' + M_CX + '" cy="' + M_CY + '" r="' + M_R.toFixed(2) + '" fill="rgba(47,134,246,0.96)"/>' +
     // 4b. 司机头像（若有则覆盖在圆盘上，圆形裁剪）
-    '<clipPath id="avatarClip"><circle cx="' + M_CX + '" cy="' + M_CY + '" r="' + (M_R - 3) + '"/></clipPath>' +
-    '<image id="avatarImg" x="' + (M_CX - (M_R - 3)) + '" y="' + (M_CY - (M_R - 3)) +
-    '" width="' + (M_R - 3) * 2 + '" height="' + (M_R - 3) * 2 +
+    '<clipPath id="avatarClip"><circle cx="' + M_CX + '" cy="' + M_CY + '" r="' + M_AVATAR_R.toFixed(2) + '"/></clipPath>' +
+    '<image id="avatarImg" x="' + (M_CX - M_AVATAR_R).toFixed(2) + '" y="' + (M_CY - M_AVATAR_R).toFixed(2) +
+    '" width="' + (M_AVATAR_R * 2).toFixed(2) + '" height="' + (M_AVATAR_R * 2).toFixed(2) +
     '" clip-path="url(#avatarClip)" style="display:none;pointer-events:none;"/>' +
     // 5. 初始圆的白色轮廓（白色圆周线，分隔圆盘与指针）
-    '<circle cx="' + M_CX + '" cy="' + M_CY + '" r="' + M_R + '" fill="none" stroke="#ffffff" stroke-width="3.5"/>' +
+    '<circle cx="' + M_CX + '" cy="' + M_CY + '" r="' + M_R.toFixed(2) + '" fill="none" stroke="#ffffff" stroke-width="' + M_WHITE_BORDER.toFixed(2) + '"/>' +
     "</svg>";
 
   const marker = new AMap.Marker({
@@ -414,6 +419,9 @@ function onLocation(m) {
     driverArrowG = created.arrowG;
     driverAvatarImg = created.avatarImg;
     map.add(driverMarker);
+    // 连接成功后自动把地图焦点移到司机所在区域，不用好友自己找
+    map.setCenter(pos);
+    applyZoom();
   } else {
     driverMarker.setPosition(pos);
     updateDriverArrow(m.heading);
