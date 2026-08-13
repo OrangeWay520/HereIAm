@@ -15,9 +15,14 @@ let joinTimer = null;
 let map = null;
 let driverMarker = null; // 司机定位标
 let driverArrowG = null; // 司机定位标内的三角形指针(<g>)
+let driverAvatarImg = null; // 司机定位标内的头像(<image>)
 let myMarker = null; // 好友自己位置
 let myPos = null; // 好友自己坐标(GCJ-02)
 let follow = false; // 是否跟随司机（定位司机模式）
+
+// 本好友会话的唯一 ID：司机据此区分不同好友，支持多好友同时查看
+const friendId =
+  Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 
 function setStatus(text, on = false) {
   const el = $("status");
@@ -72,44 +77,106 @@ function initMap() {
 }
 
 // ============================================================
-//  司机定位标：高德风格 —— 半透明外晕 + 实心圆 + 中心白点
-//  + 白色三角形指针绕中心旋转指向行进方向(heading)。
-//  静止时(heading 为 null)保持最后已知方向，避免箭头乱转。
+//  司机定位标：固定圆盘 + 旋转指针（水滴 = 圆的60°/300°切线围成）
+//  —— 固定层：蓝色圆盘(初始圆内，预留头像位) + 白色圆周线，永不旋转
+//  —— 旋转层：蓝色指针(圆外切线区域) + 白色外轮廓 + 蓝色发散光晕，
+//            绕初始圆圆心整体旋转，指针尖端指向行进方向(heading)
+//  角度：0°=北(朝上) / 90°=东 / 180°=南 / 270°=西，顺时针
+//  几何规格（圆心 M_CX,M_CY）：
+//    基础圆半径 r → 尖顶 = (cx, cy-2r)，切点 = (cx±r·cos30°, cy-r/2)
+//    指针 = 尖顶与两切点围成的三角形（圆外部分），底边与圆相切
+//    白色外轮廓 r_white = 25.5 (=R+W)，圆盘 r_blue = 22 (=R)
 // ============================================================
+const M_R = 22, M_WHITE_BORDER = 3.5;
+const M_R_WHITE = M_R + M_WHITE_BORDER;   // 25.5
+const M_CX = 48;                          // SVG 圆心 X
+const M_CY = 72;                          // SVG 圆心 Y（偏下给指针留空间）
 function createDriverMarker(pos, heading) {
   const content = document.createElement("div");
-  content.style.cssText = "width:48px;height:48px;position:relative;";
+  content.style.cssText = "width:96px;height:120px;position:relative;";
   content.innerHTML =
-    '<svg width="48" height="48" viewBox="0 0 48 48" style="position:absolute;inset:0;">' +
-    // 外圈半透明晕
-    '<circle cx="24" cy="24" r="23" fill="rgba(64,158,255,0.18)" stroke="#409EFF" stroke-width="2"/>' +
-    // 实心圆
-    '<circle cx="24" cy="24" r="15" fill="#409EFF"/>' +
-    // 中心白点（盖在三角底部）
-    '<circle cx="24" cy="24" r="3.6" fill="#fff"/>' +
-    // 三角形指针：尖端朝上(北)，绕中心旋转指向行进方向
-    '<g transform="rotate(' +
-    (heading || 0) +
-    ' 24 24)">' +
-    '<polygon points="24,9 28.5,21 19.5,21" fill="#fff"/>' +
+    '<svg width="96" height="120" viewBox="0 0 96 120" style="position:absolute;inset:0;">' +
+    '<defs><filter id="glowF" x="-80%" y="-80%" width="260%" height="260%">' +
+    '<feGaussianBlur stdDeviation="2.2"/></filter></defs>' +
+    // ========== 旋转层（指针 + 白色外轮廓 + 蓝色发散光）==========
+    // 整个旋转层绕初始圆圆心 M_CX,M_CY 旋转
+    '<g id="arrowG" transform="rotate(' + (heading || 0) + " " + M_CX + " " + M_CY + ')">' +
+    // 1. 蓝色发散光晕（单层淡蓝 + 模糊，隐隐发散，替代灰色阴影）
+    '<path d="' + buildWaterdropPathD(M_R_WHITE) + '" fill="none" stroke="rgba(47,134,246,0.28)" stroke-width="5" stroke-linejoin="round" filter="url(#glowF)"/>' +
+    // 2. 白色底层水滴（r = R+W = 25.5，外圈白色轮廓，无灰色描边）
+    '<path d="' + buildWaterdropPathD(M_R_WHITE) + '" fill="#ffffff"/>' +
+    // 3. 蓝色指针（圆外切线区域：尖顶 + 两切点围成的三角形，随旋转层旋转）
+    '<path d="' + buildPointerPathD() + '" fill="rgba(47,134,246,0.96)"/>' +
     "</g>" +
+    // ========== 固定层（圆盘 + 白色圆周线，永不旋转，预留头像位）==========
+    // 4. 蓝色圆盘（初始圆内区域，后续可放个性化头像）
+    '<circle cx="' + M_CX + '" cy="' + M_CY + '" r="' + M_R + '" fill="rgba(47,134,246,0.96)"/>' +
+    // 4b. 司机头像（若有则覆盖在圆盘上，圆形裁剪）
+    '<clipPath id="avatarClip"><circle cx="' + M_CX + '" cy="' + M_CY + '" r="' + (M_R - 3) + '"/></clipPath>' +
+    '<image id="avatarImg" x="' + (M_CX - (M_R - 3)) + '" y="' + (M_CY - (M_R - 3)) +
+    '" width="' + (M_R - 3) * 2 + '" height="' + (M_R - 3) * 2 +
+    '" clip-path="url(#avatarClip)" style="display:none;pointer-events:none;"/>' +
+    // 5. 初始圆的白色轮廓（白色圆周线，分隔圆盘与指针）
+    '<circle cx="' + M_CX + '" cy="' + M_CY + '" r="' + M_R + '" fill="none" stroke="#ffffff" stroke-width="3.5"/>' +
     "</svg>";
-  content.style.cssText += "filter:drop-shadow(0 1px 3px rgba(0,0,0,.25));";
 
-  const arrowG = content.querySelector("g");
   const marker = new AMap.Marker({
     position: pos,
     content: content,
-    offset: new AMap.Pixel(-24, -24), // 让定位标中心对准坐标点
+    // 让水滴圆心（原圆盘中心）对准坐标点
+    offset: new AMap.Pixel(-M_CX, -M_CY),
     zIndex: 120,
   });
-  return { marker, arrowG };
+  const arrowG = content.querySelector("#arrowG");
+  const avatarImg = content.querySelector("#avatarImg");
+  return { marker, arrowG, avatarImg };
 }
 
-// 更新三角形指针方向；heading 为 null（静止）时保持原方向
+// 显示司机头像（数据通道推送的 data URL）
+function setDriverAvatar(dataUrl) {
+  if (!dataUrl) return;
+  if (!driverAvatarImg) return;
+  driverAvatarImg.setAttribute("href", dataUrl);
+  driverAvatarImg.style.display = "block";
+}
+
+// 构建水滴外轮廓 Path d 字符串
+// 几何：尖顶(cx, cy-2r) → 右下切点(cx+r·cos30°, cy-r/2)
+//      → 顺时针大圆弧(经正南，240°) → 左下切点 → 闭合
+function buildWaterdropPathD(r) {
+  var cx = M_CX, cy = M_CY;
+  var cos30 = Math.cos(Math.PI / 6);   // √3/2 ≈ 0.8660
+  var tipY = cy - 2 * r;
+  var tanY = cy - r * 0.5;             // 切点 y：圆心上方 r/2
+  var tanX = r * cos30;                // 切点 x 偏移：r·cos30°
+  // A r r 0 large-arc(1) sweep(1=顺时针) end-x end-y
+  return "M" + cx + "," + tipY.toFixed(2) +
+         " L" + (cx + tanX).toFixed(2) + "," + tanY.toFixed(2) +
+         " A " + r + "," + r + " 0 1 1 " + (cx - tanX).toFixed(2) + "," + tanY.toFixed(2) +
+         " Z";
+}
+
+// 构建蓝色指针 Path d 字符串（圆外切线区域）
+// 几何：尖顶(cx, cy-2r) → 右切点 → 左切点 → 闭合（底边 = 切点连线，与圆相切）
+function buildPointerPathD() {
+  var cx = M_CX, cy = M_CY, r = M_R;
+  var cos30 = Math.cos(Math.PI / 6);   // √3/2 ≈ 0.8660
+  var tipY = cy - 2 * r;
+  var tanY = cy - r * 0.5;
+  var tanX = r * cos30;
+  return "M" + cx + "," + tipY.toFixed(2) +
+         " L" + (cx + tanX).toFixed(2) + "," + tanY.toFixed(2) +
+         " L" + (cx - tanX).toFixed(2) + "," + tanY.toFixed(2) +
+         " Z";
+}
+
+// 更新方向箭头指向；heading 为 null（静止）时保持最后已知方向
 function updateDriverArrow(heading) {
   if (driverArrowG && heading != null) {
-    driverArrowG.setAttribute("transform", "rotate(" + heading + " 24 24)");
+    driverArrowG.setAttribute(
+      "transform",
+      "rotate(" + heading + " " + M_CX + " " + M_CY + ")"
+    );
   }
 }
 
@@ -213,17 +280,23 @@ async function init() {
 
   signaling = await connectSignaling("hereiam_" + code, onSignal);
   setStatus("等待司机连接…");
-  // 通知司机有好友加入，司机据此建立 P2P 连接
-  signaling.send({ type: "join" });
+  // 通知司机有好友加入，司机据此建立 P2P 连接（携带本好友唯一 ID）
   // 司机可能还没点"开始"（信令通道尚未建立），会收不到这次 join。
-  // 因此每 2 秒重发一次 join，直到连接建立为止。
+  // 因此每 2 秒重发一次 join，直到连接建立为止；断开后也会重启。
+  signaling.send({ type: "join", id: friendId });
+  startJoinTimer();
+}
+
+// 每 2 秒重发一次 join，直到与司机直连成功
+function startJoinTimer() {
+  if (joinTimer) return; // 已有定时器在跑，不重复
   joinTimer = setInterval(() => {
     if (pc && pc.connectionState === "connected") {
       clearInterval(joinTimer);
       joinTimer = null;
       return;
     }
-    signaling.send({ type: "join" });
+    signaling.send({ type: "join", id: friendId });
   }, 2000);
 }
 
@@ -249,21 +322,43 @@ async function handleOffer(offer) {
   pc = new RTCPeerConnection({ iceServers: CONFIG.stunServers });
   pc.onicecandidate = (e) => {
     if (e.candidate && signaling)
-      signaling.send({ type: "candidate", candidate: e.candidate });
+      signaling.send({ type: "candidate", candidate: e.candidate, id: friendId });
   };
   pc.ondatachannel = (e) => {
     dc = e.channel;
-    dc.onmessage = (ev) => onLocation(JSON.parse(ev.data));
+    dc.onmessage = (ev) => {
+      let m;
+      try {
+        m = JSON.parse(ev.data);
+      } catch (e) {
+        return;
+      }
+      if (m && m.type === "avatar") {
+        setDriverAvatar(m.data);
+      } else if (m && m.type === "loc") {
+        onLocation(m);
+      } else if (m && m.lat !== undefined) {
+        // 兼容旧版司机端（无 type 字段的纯位置消息）
+        onLocation(m);
+      }
+    };
   };
   pc.onconnectionstatechange = () => {
-    if (pc && pc.connectionState === "connected")
+    if (!pc) return;
+    const st = pc.connectionState;
+    if (st === "connected") {
       setStatus("已点对点直连", true);
+    } else if (st === "disconnected" || st === "failed") {
+      setStatus("连接中断，正在自动重连…");
+      // 司机端也会自动重连；这里同时重启 join 定时器，双保险
+      startJoinTimer();
+    }
   };
 
   await pc.setRemoteDescription(offer);
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
-  signaling.send({ type: "answer", sdp: answer });
+  signaling.send({ type: "answer", sdp: answer, id: friendId });
   setStatus("已应答，正在直连…");
 }
 
@@ -317,6 +412,7 @@ function onLocation(m) {
     const created = createDriverMarker(pos, m.heading);
     driverMarker = created.marker;
     driverArrowG = created.arrowG;
+    driverAvatarImg = created.avatarImg;
     map.add(driverMarker);
   } else {
     driverMarker.setPosition(pos);
@@ -343,6 +439,9 @@ function onLocation(m) {
 }
 
 window.addEventListener("beforeunload", () => {
+  if (joinTimer) clearInterval(joinTimer);
+  // 通知司机本好友离开，司机立即释放对应连接并更新好友数
+  if (signaling) signaling.send({ type: "leave", id: friendId });
   if (pc) pc.close();
   if (signaling) signaling.close();
 });
