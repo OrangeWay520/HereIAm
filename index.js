@@ -17,8 +17,7 @@ let joinTimer = null;           // 查看者重发 join 定时器
 // 自己的位置（进入页面即自动定位，同 App 端）
 let myWatchId = null;           // 自己的定位 watch
 let myPos = null;               // 最新位置 {lat,lng,heading}
-let deviceHeading = null;       // 设备指南针朝向（静止时方向指针也转）
-let geoHeadingAvailable = false; // GPS 是否提供行进方向（移动时优先用 GPS）
+let deviceHeading = null;       // 设备指南针朝向（真北，实时更新）
 let lastCompassUpdate = 0;      // 指南针刷新节流
 let lastCompassSend = 0;        // 方向回传节流
 let myMarker = null, myArrowG = null, myHasCentered = false;
@@ -125,6 +124,8 @@ function startView() {
 
 function stopShare() {
   // 注意：不清除 myWatchId —— 全局定位持续运行，地图继续显示自己的定位标
+  // 先发 bye 通知所有对端「分享已结束」，对方才能停止重连并清除定位标
+  if (signaling) { try { signaling.send({ type: "bye" }); } catch (e) {} }
   if (pc) { try { pc.close(); } catch (e) {} pc = null; }
   if (signaling) { try { signaling.close(); } catch (e) {} signaling = null; }
   shareCode = null;
@@ -157,6 +158,8 @@ async function initShare(code) {
     "https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=" +
     encodeURIComponent(link);
   setShareStatus("正在建立点对点连接…", false);
+  // 共享开始即显示「停止共享」按钮，随时可退出（无需等好友连接）
+  $("stopBtn").style.display = "block";
 
   try {
     signaling = await connectSignaling("hereiam_" + code, onSignalShare);
@@ -226,10 +229,10 @@ function startMyLocation() {
     myWatchId = navigator.geolocation.watchPosition(
       (pos) => {
         retries = 0;
-        // 方向：GPS 行进方向优先（移动时准确）；静止时用设备指南针（initCompass 融合）
-        geoHeadingAvailable = pos.coords.heading != null;
-        let heading = pos.coords.heading != null ? Math.round(pos.coords.heading) : null;
-        if (heading == null && deviceHeading != null) heading = Math.round(deviceHeading);
+        // 方向：指南针优先（实时、静止也转）；无指南针时退回 GPS 行进方向
+        let heading = deviceHeading != null
+          ? Math.round(deviceHeading)
+          : (pos.coords.heading != null ? Math.round(pos.coords.heading) : null);
         myPos = {
           lat: pos.coords.latitude,
           lng: pos.coords.longitude,
@@ -603,18 +606,23 @@ function setIndicator(on) {
   $("indicator").className = "indicator" + (on ? " on" : "");
 }
 
-// ========== 指南针（设备朝向）：静止时也让方向指针转动 ==========
+// ========== 指南针（设备朝向）：让方向指针实时指向手机朝向 ==========
+// 关键：Android 用 deviceorientationabsolute 才能拿到「真北」绝对角度；
+// iOS 用 deviceorientation 的 webkitCompassHeading（已是真北方位角）。
+// 指南针可用时作为首选方向来源（同高德/安卓端），GPS 行进方向仅作兜底。
 function initCompass() {
   if (typeof DeviceOrientationEvent === "undefined") return;
-  const start = () => {
+  const addListener = () => {
+    // Android Chrome 需监听 deviceorientationabsolute（否则 alpha 是相对值，不是真北）
+    const useAbsolute = "ondeviceorientationabsolute" in window;
     window.addEventListener(
-      "deviceorientation",
+      useAbsolute ? "deviceorientationabsolute" : "deviceorientation",
       (e) => {
         let deg = null;
-        if (e.absolute === false && e.webkitCompassHeading !== undefined) {
-          deg = 360 - e.webkitCompassHeading; // iOS：webkitCompassHeading 即方位角
+        if (e.webkitCompassHeading !== undefined) {
+          deg = e.webkitCompassHeading;     // iOS：真北方位角（0=北，顺时针）
         } else if (e.alpha !== null && e.alpha !== undefined) {
-          deg = (360 - e.alpha) % 360;         // Android：alpha 相对北，顺时针
+          deg = (360 - e.alpha) % 360;      // Android：alpha 相对真北，顺时针
         }
         if (deg == null) return;
         // 指数平滑（0.3），避免指针抖动
@@ -626,8 +634,8 @@ function initCompass() {
         } else {
           deviceHeading = deg;
         }
-        // 静止时（无 GPS 行进方向）用指南针驱动自己的定位标，指针随设备转动（节流）
-        if (!geoHeadingAvailable && myPos) {
+        // 用指南针驱动自己的定位标指针旋转 + 定期回传方向（节流）
+        if (myPos) {
           myPos.heading = Math.round(deviceHeading);
           const now = Date.now();
           if (now - lastCompassUpdate >= 80) {
@@ -644,13 +652,17 @@ function initCompass() {
     );
   };
   if (DeviceOrientationEvent.requestPermission) {
-    DeviceOrientationEvent.requestPermission()
-      .then((state) => {
-        if (state === "granted") start();
-      })
-      .catch(() => {});
+    // iOS 13+：必须在用户手势中调用，首次点击页面任意处时请求
+    const request = () => {
+      DeviceOrientationEvent.requestPermission()
+        .then((state) => {
+          if (state === "granted") addListener();
+        })
+        .catch(() => {});
+    };
+    window.addEventListener("click", request, { once: true });
   } else {
-    start();
+    addListener();
   }
 }
 

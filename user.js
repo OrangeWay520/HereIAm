@@ -2,6 +2,7 @@
 //  HereIAm 浏览器用户中心 —— 用户名 + 头像（localStorage 持久化）
 //  首次使用自动分配随机用户名「浏览器用户-XXXX」；
 //  用户可在左上角用户中心修改头像/用户名。
+//  头像支持「选区裁剪」：选图后可在裁剪框中拖动/缩放选择区域。
 //  两处页面共用：index.html（首页）与 friend.html（好友端）。
 // ============================================================
 
@@ -89,33 +90,131 @@ function saveUserCenter() {
   closeUserCenter();
 }
 
-// 选择头像文件 → 压缩到 128px 内 → 存为 data URL（控制 WebRTC 消息体积）
+// ============================================================
+//  头像裁剪：选图 → 拖动/缩放选区 → 裁剪为 128x128
+// ============================================================
+let cropState = null; // {nw,nh,dw,dh,dx,dy,fx,fy,fs}
+
+function openCropStage() {
+  const o = document.getElementById("cropOverlay");
+  const panel = document.getElementById("ucPanel");
+  if (panel) panel.style.display = "none";
+  if (o) o.style.display = "flex";
+}
+
+function closeCropStage() {
+  const o = document.getElementById("cropOverlay");
+  const panel = document.getElementById("ucPanel");
+  if (o) o.style.display = "none";
+  if (panel) panel.style.display = "block";
+  cropState = null;
+}
+
+// 选择头像文件 → 进入裁剪
 function pickAvatarFromInput(input) {
   const file = input.files && input.files[0];
   if (!file) return;
   const reader = new FileReader();
   reader.onload = (e) => {
     const img = new Image();
-    img.onload = () => {
-      const max = 128;
-      const scale = Math.min(1, max / Math.max(img.width, img.height));
-      const w = Math.max(1, Math.round(img.width * scale));
-      const h = Math.max(1, Math.round(img.height * scale));
-      const canvas = document.createElement("canvas");
-      canvas.width = w;
-      canvas.height = h;
-      const ctx = canvas.getContext("2d");
-      // 居中裁剪为正方形，避免拉伸变形
-      const side = Math.min(w, h);
-      ctx.drawImage(img, (w - side) / 2, (h - side) / 2, side, side, 0, 0, side, side);
-      userProfile.avatar = canvas.toDataURL("image/jpeg", 0.8);
-      const preview = document.getElementById("ucAvatarPreview");
-      preview.src = userProfile.avatar;
-      preview.style.display = "block";
-    };
+    img.onload = () => setupCrop(img, e.target.result);
     img.src = e.target.result;
   };
   reader.readAsDataURL(file);
+}
+
+// 初始化裁剪舞台：图片适配显示 + 默认选区（中央 70%）
+function setupCrop(img, dataUrl) {
+  const stage = document.getElementById("cropStage");
+  const imgEl = document.getElementById("cropImg");
+  if (!stage || !imgEl) return;
+  imgEl.src = dataUrl;
+  const sw = stage.clientWidth;
+  const sh = stage.clientHeight;
+  const pad = 20;
+  const scale = Math.min((sw - pad * 2) / img.naturalWidth, (sh - pad * 2) / img.naturalHeight);
+  const dw = img.naturalWidth * scale;
+  const dh = img.naturalHeight * scale;
+  const dx = (sw - dw) / 2;
+  const dy = (sh - dh) / 2;
+  imgEl.style.left = dx + "px";
+  imgEl.style.top = dy + "px";
+  imgEl.style.width = dw + "px";
+  imgEl.style.height = dh + "px";
+  cropState = { nw: img.naturalWidth, nh: img.naturalHeight, dw: dw, dh: dh, dx: dx, dy: dy };
+  const fs = Math.min(dw, dh) * 0.7;
+  setFrame(dx + (dw - fs) / 2, dy + (dh - fs) / 2, fs);
+  openCropStage();
+}
+
+// 设置/约束选区（限制在图片显示区域内）
+function setFrame(x, y, s) {
+  if (!cropState) return;
+  const st = cropState;
+  const frame = document.getElementById("cropFrame");
+  x = Math.max(st.dx, Math.min(x, st.dx + st.dw - s));
+  y = Math.max(st.dy, Math.min(y, st.dy + st.dh - s));
+  frame.style.left = x + "px";
+  frame.style.top = y + "px";
+  frame.style.width = s + "px";
+  frame.style.height = s + "px";
+  st.fx = x;
+  st.fy = y;
+  st.fs = s;
+}
+
+// 确定裁剪：按选区生成 128x128 头像
+function confirmCrop() {
+  if (!cropState) return;
+  const st = cropState;
+  const imgEl = document.getElementById("cropImg");
+  const imgScale = st.nw / st.dw;
+  const sx = (st.fx - st.dx) * imgScale;
+  const sy = (st.fy - st.dy) * imgScale;
+  const ss = st.fs * imgScale;
+  const canvas = document.createElement("canvas");
+  canvas.width = 128;
+  canvas.height = 128;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(imgEl, sx, sy, ss, ss, 0, 0, 128, 128);
+  userProfile.avatar = canvas.toDataURL("image/jpeg", 0.8);
+  const preview = document.getElementById("ucAvatarPreview");
+  preview.src = userProfile.avatar;
+  preview.style.display = "block";
+  closeCropStage();
+}
+
+// 绑定裁剪手势：选区拖动（移动）+ 右下角手柄（缩放）
+function bindCropGestures() {
+  const frame = document.getElementById("cropFrame");
+  const handle = document.getElementById("cropHandle");
+  if (!frame || !handle) return;
+  let drag = null;
+  frame.addEventListener("pointerdown", (e) => {
+    if (e.target === handle) return;
+    e.preventDefault();
+    drag = { mode: "move", sx: e.clientX, sy: e.clientY, ox: cropState.fx, oy: cropState.fy };
+    frame.setPointerCapture(e.pointerId);
+  });
+  handle.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    drag = { mode: "resize", sx: e.clientX, sy: e.clientY, os: cropState.fs };
+    handle.setPointerCapture(e.pointerId);
+  });
+  frame.addEventListener("pointermove", (e) => {
+    if (!drag || !cropState) return;
+    const dx = e.clientX - drag.sx;
+    const dy = e.clientY - drag.sy;
+    if (drag.mode === "move") {
+      setFrame(drag.ox + dx, drag.oy + dy, cropState.fs);
+    } else {
+      setFrame(cropState.fx, cropState.fy, Math.max(40, drag.os + Math.max(dx, dy)));
+    }
+  });
+  const end = () => { drag = null; };
+  frame.addEventListener("pointerup", end);
+  frame.addEventListener("pointercancel", end);
 }
 
 // 绑定用户中心面板事件（页面 onload 后调用）
@@ -130,4 +229,10 @@ function bindUserCenterEvents() {
   if (save) save.addEventListener("click", saveUserCenter);
   const input = document.getElementById("ucAvatarInput");
   if (input) input.addEventListener("change", () => pickAvatarFromInput(input));
+  // 裁剪面板
+  const cancel = document.getElementById("cropCancel");
+  if (cancel) cancel.addEventListener("click", closeCropStage);
+  const confirm = document.getElementById("cropConfirm");
+  if (confirm) confirm.addEventListener("click", confirmCrop);
+  bindCropGestures();
 }

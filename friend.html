@@ -92,6 +92,31 @@
       color: #1a1a2e; outline: none; margin: 8px 0 16px;
     }
     .code-input:focus { border-color: #4b3fe3; }
+    /* ========== 头像裁剪 ========== */
+    .crop-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 40;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .crop-box { width: 88%; max-width: 360px; background: #fff; border-radius: 16px; padding: 16px; }
+    .crop-stage {
+      position: relative; width: 100%; height: 320px; background: #15151f;
+      border-radius: 10px; overflow: hidden; touch-action: none;
+    }
+    .crop-stage img {
+      position: absolute; user-select: none; -webkit-user-drag: none;
+      pointer-events: none; max-width: none;
+    }
+    .crop-frame {
+      position: absolute; border: 2px solid #fff;
+      box-shadow: 0 0 0 9999px rgba(0,0,0,.55);
+      cursor: move; touch-action: none;
+    }
+    .crop-handle {
+      position: absolute; right: -9px; bottom: -9px; width: 20px; height: 20px;
+      border: 2px solid #fff; border-radius: 4px; background: #4b3fe3;
+      cursor: nwse-resize; touch-action: none;
+    }
+    .crop-tip { font-size: 11px; color: #9ca3af; text-align: center; margin-top: 8px; }
   </style>
 </head>
 <body>
@@ -126,11 +151,31 @@
     <button class="btn-primary" id="ucSave">保存</button>
   </div>
 
+  <!-- 头像裁剪 -->
+  <div class="crop-overlay" id="cropOverlay" style="display:none">
+    <div class="crop-box">
+      <div class="panel-header" style="margin-bottom:10px">
+        <span class="panel-title">调整头像</span>
+      </div>
+      <div class="crop-stage" id="cropStage">
+        <img id="cropImg" alt="头像">
+        <div class="crop-frame" id="cropFrame">
+          <div class="crop-handle" id="cropHandle"></div>
+        </div>
+      </div>
+      <div class="crop-tip">拖动选区调整位置，拖右下角手柄调整大小</div>
+      <div style="display:flex;gap:12px;margin-top:12px">
+        <button class="btn-outline" id="cropCancel" style="flex:1">取消</button>
+        <button class="btn-primary" id="cropConfirm" style="flex:1">确定</button>
+      </div>
+    </div>
+  </div>
+
   <script src="https://cdn.ably.com/lib/ably.min-1.2.41.js"></script>
   <!-- 加版本号：防止浏览器/CDN 缓存旧版 JS，更新后强制重新加载 -->
-  <script src="config.js?v=20260815g"></script>
-  <script src="signaling.js?v=20260815g"></script>
-  <script src="user.js?v=20260815g"></script>
-  <script src="friend.js?v=20260815g"></script>
+  <script src="config.js?v=20260815h"></script>
+  <script src="signaling.js?v=20260815h"></script>
+  <script src="user.js?v=20260815h"></script>
+  <script src="friend.js?v=20260815h"></script>
 </body>
 </html>
