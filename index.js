@@ -21,8 +21,8 @@ let hasCentered = false;
 // 本好友会话唯一 ID（查看模式用）
 const friendId = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 
-// ========== 水滴定位标常量（与 friend.js 一致，M_SCALE=2/3 放大一倍）==========
-const M_SCALE = 2 / 3;
+// ========== 水滴定位标常量（与 friend.js 一致，M_SCALE=8/15）==========
+const M_SCALE = 8 / 15;
 const M_R = 22 * M_SCALE;
 const M_WHITE_BORDER = 3.5 * M_SCALE;
 const M_AVATAR_R = M_R - 1.2;
