@@ -20,6 +20,22 @@
       pointer-events: none;
     }
     .topbar-logo { height: 36px; pointer-events: auto; }
+    /* 左上角用户中心入口（头像 + 名字） */
+    .user-entry {
+      position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
+      display: flex; align-items: center; gap: 6px; cursor: pointer;
+      pointer-events: auto; max-width: 42%;
+    }
+    .user-avatar {
+      width: 34px; height: 34px; border-radius: 50%; background: #fff; color: #4b3fe3;
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 700; font-size: 16px; border: 2px solid rgba(255,255,255,.4);
+      background-size: cover; flex-shrink: 0;
+    }
+    .user-name {
+      color: #fff; font-size: 12px; font-weight: 600;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
     .indicator {
       position: absolute; right: 16px; top: 50%; transform: translateY(-50%);
       width: 6px; height: 6px; border-radius: 50%; background: #b6bcc6;
@@ -124,6 +140,13 @@
     /* 状态文字 */
     .status { margin-top: 12px; font-size: 13px; color: #6b7280; text-align: center; }
     .status.on { color: #16a34a; font-weight: 600; }
+
+    /* ========== 用户中心 ========== */
+    .uc-avatar {
+      width: 88px; height: 88px; border-radius: 50%; background: #f3f5f9;
+      object-fit: cover; display: block; margin: 0 auto 12px;
+    }
+    .uc-pick { display: block; margin: 0 auto; width: auto; padding: 8px 18px; font-size: 13px; }
   </style>
 </head>
 <body>
@@ -132,6 +155,10 @@
 
   <!-- 顶部状态栏 -->
   <div class="topbar">
+    <div class="user-entry" id="userEntry" title="用户中心">
+      <div class="user-avatar" id="userAvatar"></div>
+      <span class="user-name" id="userName"></span>
+    </div>
     <img class="topbar-logo" src="bar_logo1.png" alt="HereIAm">
     <div class="indicator" id="indicator"></div>
   </div>
@@ -216,9 +243,24 @@
     </div>
   </div>
 
+  <!-- 用户中心 -->
+  <div class="overlay" id="ucOverlay" style="display:none"></div>
+  <div class="panel" id="ucPanel" style="display:none">
+    <div class="panel-header">
+      <span class="panel-title">用户中心</span>
+      <span class="panel-close" id="ucClose">✕</span>
+    </div>
+    <img class="uc-avatar" id="ucAvatarPreview" alt="头像" style="display:none">
+    <label class="btn-outline uc-pick" style="text-align:center">选择头像<input type="file" id="ucAvatarInput" accept="image/*" style="display:none"></label>
+    <div class="panel-label" style="margin-top:16px">用户名（12 字以内，会显示给好友）</div>
+    <input class="code-input" id="ucName" maxlength="12" placeholder="请输入用户名">
+    <button class="btn-primary" id="ucSave">保存</button>
+  </div>
+
   <script src="https://cdn.ably.com/lib/ably.min-1.2.41.js"></script>
-  <script src="config.js?v=20260815e"></script>
-  <script src="signaling.js?v=20260815e"></script>
-  <script src="index.js?v=20260815e"></script>
+  <script src="config.js?v=20260815f"></script>
+  <script src="signaling.js?v=20260815f"></script>
+  <script src="user.js?v=20260815f"></script>
+  <script src="index.js?v=20260815f"></script>
 </body>
 </html>

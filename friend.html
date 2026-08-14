@@ -15,6 +15,21 @@
       align-items: center; justify-content: space-between; gap: 8px;
     }
     .top .t { font-size: 15px; font-weight: 600; }
+    /* 左上角用户中心入口 */
+    .user-entry {
+      display: flex; align-items: center; gap: 6px; cursor: pointer;
+      max-width: 42%; min-width: 0;
+    }
+    .user-avatar {
+      width: 32px; height: 32px; border-radius: 50%; background: #fff; color: #4b3fe3;
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 700; font-size: 15px; border: 2px solid rgba(255,255,255,.4);
+      background-size: cover; flex-shrink: 0;
+    }
+    .user-name {
+      color: #fff; font-size: 12px; font-weight: 600;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
     .status { font-size: 12px; padding: 4px 10px; border-radius: 999px; background: rgba(255,255,255,.18); }
     .status.on { background: #22c55e; }
     #map { flex: 1; min-height: 60vh; width: 100%; }
@@ -40,11 +55,54 @@
       display: none; z-index: 999; max-width: 200px;
     }
     .loc-tip.show { display: block; }
+    /* ========== 用户中心 ========== */
+    .panel {
+      position: absolute; bottom: 0; left: 0; right: 0; z-index: 30;
+      background: #fff; border-radius: 24px 24px 0 0; padding: 20px 20px 32px;
+      max-width: 440px; margin: 0 auto;
+      box-shadow: 0 -4px 24px rgba(0,0,0,.1);
+      animation: slideUp .25s ease;
+    }
+    @keyframes slideUp { from { transform: translateY(100%) } to { transform: translateY(0) } }
+    .panel-header { display: flex; align-items: center; margin-bottom: 16px; }
+    .panel-title { font-size: 19px; font-weight: 700; flex: 1; color: #1a1a2e; }
+    .panel-close { font-size: 22px; color: #6b7280; cursor: pointer; padding: 4px 8px; }
+    .panel-label { font-size: 12px; color: #6b7280; margin-bottom: 4px; }
+    .overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,.4); z-index: 20;
+      animation: fade .2s;
+    }
+    @keyframes fade { from { opacity: 0 } to { opacity: 1 } }
+    .uc-avatar {
+      width: 88px; height: 88px; border-radius: 50%; background: #f3f5f9;
+      object-fit: cover; display: block; margin: 0 auto 12px;
+    }
+    .uc-pick { display: block; margin: 0 auto; width: auto; padding: 8px 18px; font-size: 13px; }
+    .btn-outline {
+      padding: 12px; border: 1px solid #4b3fe3; border-radius: 12px;
+      font-size: 15px; font-weight: 600; background: #fff; color: #4b3fe3; cursor: pointer;
+    }
+    .btn-primary {
+      width: 100%; padding: 14px; margin-top: 12px; border: none; border-radius: 12px;
+      font-size: 16px; font-weight: 600; background: #4b3fe3; color: #fff; cursor: pointer;
+    }
+    .code-input {
+      width: 100%; padding: 14px; border: 1px solid #d1d5db; border-radius: 12px;
+      font-size: 22px; font-weight: 700; letter-spacing: 4px; text-align: center;
+      color: #1a1a2e; outline: none; margin: 8px 0 16px;
+    }
+    .code-input:focus { border-color: #4b3fe3; }
   </style>
 </head>
 <body>
   <div class="top">
-    <span class="t">HereIAm · 好友位置</span>
+    <div style="display:flex;align-items:center;gap:10px;min-width:0">
+      <div class="user-entry" id="userEntry" title="用户中心">
+        <div class="user-avatar" id="userAvatar"></div>
+        <span class="user-name" id="userName"></span>
+      </div>
+      <span class="t">好友位置</span>
+    </div>
     <span class="status" id="status">等待连接…</span>
   </div>
   <div id="map"><p style="padding:20px;color:#9ca3af">地图加载中…</p></div>
@@ -54,10 +112,25 @@
   </button>
   <div class="loc-tip" id="locTip">已跟随好友，地图将随距离自动缩放</div>
 
+  <!-- 用户中心 -->
+  <div class="overlay" id="ucOverlay" style="display:none"></div>
+  <div class="panel" id="ucPanel" style="display:none">
+    <div class="panel-header">
+      <span class="panel-title">用户中心</span>
+      <span class="panel-close" id="ucClose">✕</span>
+    </div>
+    <img class="uc-avatar" id="ucAvatarPreview" alt="头像" style="display:none">
+    <label class="btn-outline uc-pick" style="text-align:center">选择头像<input type="file" id="ucAvatarInput" accept="image/*" style="display:none"></label>
+    <div class="panel-label" style="margin-top:16px">用户名（12 字以内，会显示给好友）</div>
+    <input class="code-input" id="ucName" maxlength="12" placeholder="请输入用户名">
+    <button class="btn-primary" id="ucSave">保存</button>
+  </div>
+
   <script src="https://cdn.ably.com/lib/ably.min-1.2.41.js"></script>
   <!-- 加版本号：防止浏览器/CDN 缓存旧版 JS，更新后强制重新加载 -->
-  <script src="config.js?v=20260815c"></script>
-  <script src="signaling.js?v=20260815c"></script>
-  <script src="friend.js?v=20260815c"></script>
+  <script src="config.js?v=20260815f"></script>
+  <script src="signaling.js?v=20260815f"></script>
+  <script src="user.js?v=20260815f"></script>
+  <script src="friend.js?v=20260815f"></script>
 </body>
 </html>

@@ -17,6 +17,7 @@ let joinTimer = null;           // 查看者重发 join 定时器
 // 自己的位置（进入页面即自动定位，同 App 端）
 let myWatchId = null;           // 自己的定位 watch
 let myPos = null;               // 最新位置 {lat,lng,heading}
+let deviceHeading = null;       // 设备指南针朝向（静止时方向指针也转）
 let myMarker = null, myArrowG = null, myHasCentered = false;
 
 // 查看模式：好友定位标
@@ -168,7 +169,11 @@ function createConnection() {
   if (pc) { try { pc.close(); } catch (e) {} }
   pc = new RTCPeerConnection({ iceServers: CONFIG.stunServers });
   dc = pc.createDataChannel("location");
-  dc.onopen = startLocationStream;
+  dc.onopen = () => {
+    // 连接建立后把自己的资料（用户名+头像）推送给好友端
+    sendMyProfile();
+    startLocationStream();
+  };
 
   pc.onicecandidate = (e) => {
     if (e.candidate && signaling)
@@ -179,9 +184,11 @@ function createConnection() {
     const s = pc.connectionState;
     if (s === "connected") {
       setShareStatus("已点对点直连，正在实时上报位置", true);
+      setIndicator(true);
       $("stopBtn").style.display = "block";
     } else if (s === "failed" || s === "disconnected") {
       setShareStatus("连接断开，等待好友重新加入…", false);
+      setIndicator(false);
     }
   };
 
@@ -216,10 +223,13 @@ function startMyLocation() {
     myWatchId = navigator.geolocation.watchPosition(
       (pos) => {
         retries = 0;
+        // 方向：GPS 行进方向优先（移动时准确）；静止时用设备指南针（initCompass 融合）
+        let heading = pos.coords.heading != null ? Math.round(pos.coords.heading) : null;
+        if (heading == null && deviceHeading != null) heading = Math.round(deviceHeading);
         myPos = {
           lat: pos.coords.latitude,
           lng: pos.coords.longitude,
-          heading: pos.coords.heading != null ? Math.round(pos.coords.heading) : null,
+          heading: heading,
           acc: Math.round(pos.coords.accuracy || 0),
           t: Date.now(),
         };
@@ -336,16 +346,8 @@ function stopView() {
   if (joinTimer) { clearInterval(joinTimer); joinTimer = null; }
   if (pc) { try { pc.close(); } catch (e) {} pc = null; dc = null; }
   if (signaling) { try { signaling.close(); } catch (e) {} signaling = null; }
-  if (driverMarker) {
-    try { driverMarker.setMap(null); } catch (e) {}
-    driverMarker = null;
-    driverArrowG = null;
-    driverAvatarImg = null;
-    driverNameEl = null;
-  }
-  driverAvatarData = null;
-  driverName = null;
-  hasCentered = false;
+  removeDriverMarker();
+  setIndicator(false);
   setViewStatus("已停止查看", false);
   $("viewPanel").style.display = "none";
   hideOverlay();
@@ -368,11 +370,27 @@ async function onSignalView(msg) {
     if (pc) { try { await pc.addIceCandidate(msg.candidate); } catch (e) {} }
   } else if (msg.type === "bye") {
     setViewStatus("对方已结束共享，可关闭", false);
+    setIndicator(false);
     mode = "idle";
     viewCode = null;
     if (joinTimer) { clearInterval(joinTimer); joinTimer = null; }
     if (pc) { try { pc.close(); } catch (e) {} pc = null; dc = null; }
+    removeDriverMarker();
   }
+}
+
+// 移除分享者定位标（对方结束共享 / 停止查看时调用）
+function removeDriverMarker() {
+  if (driverMarker) {
+    try { driverMarker.setMap(null); } catch (e) {}
+    driverMarker = null;
+  }
+  driverArrowG = null;
+  driverAvatarImg = null;
+  driverNameEl = null;
+  driverAvatarData = null;
+  driverName = null;
+  hasCentered = false;
 }
 
 async function handleOffer(offer) {
@@ -384,6 +402,10 @@ async function handleOffer(offer) {
   };
   pc.ondatachannel = (e) => {
     dc = e.channel;
+    dc.onopen = () => {
+      // 连接建立后把自己的资料（用户名+头像）推送给分享者（安卓端显示）
+      sendMyProfile();
+    };
     dc.onmessage = (ev) => {
       let m;
       try { m = JSON.parse(ev.data); } catch (e) { return; }
@@ -397,9 +419,12 @@ async function handleOffer(offer) {
   pc.onconnectionstatechange = () => {
     if (!pc) return;
     const st = pc.connectionState;
-    if (st === "connected") setViewStatus("已点对点直连", true);
-    else if (st === "disconnected" || st === "failed") {
+    if (st === "connected") {
+      setViewStatus("已点对点直连", true);
+      setIndicator(true);
+    } else if (st === "disconnected" || st === "failed") {
       setViewStatus("连接中断，正在自动重连…", false);
+      setIndicator(false);
       startJoinTimer();
     }
   };
@@ -574,6 +599,77 @@ function setIndicator(on) {
   $("indicator").className = "indicator" + (on ? " on" : "");
 }
 
+// ========== 指南针（设备朝向）：静止时也让方向指针转动 ==========
+function initCompass() {
+  if (typeof DeviceOrientationEvent === "undefined") return;
+  const start = () => {
+    window.addEventListener(
+      "deviceorientation",
+      (e) => {
+        let deg = null;
+        if (e.absolute === false && e.webkitCompassHeading !== undefined) {
+          deg = 360 - e.webkitCompassHeading; // iOS：webkitCompassHeading 即方位角
+        } else if (e.alpha !== null && e.alpha !== undefined) {
+          deg = (360 - e.alpha) % 360;         // Android：alpha 相对北，顺时针
+        }
+        if (deg == null) return;
+        // 指数平滑（0.3），避免指针抖动
+        if (deviceHeading != null) {
+          let diff = deg - deviceHeading;
+          if (diff > 180) diff -= 360;
+          else if (diff < -180) diff += 360;
+          deviceHeading = (deviceHeading + diff * 0.3 + 360) % 360;
+        } else {
+          deviceHeading = deg;
+        }
+        // 静止时（无 GPS heading）用指南针驱动自己的定位标
+        if (myPos && myPos.heading == null) {
+          myPos.heading = Math.round(deviceHeading);
+          updateMyMarker();
+          if (dc && dc.readyState === "open") sendMyLocationNow();
+        }
+      },
+      true
+    );
+  };
+  if (DeviceOrientationEvent.requestPermission) {
+    DeviceOrientationEvent.requestPermission()
+      .then((state) => {
+        if (state === "granted") start();
+      })
+      .catch(() => {});
+  } else {
+    start();
+  }
+}
+
+// 把自己的资料（用户名 + 头像）推送给当前对端
+function sendMyProfile() {
+  if (!dc || dc.readyState !== "open") return;
+  try {
+    const p = getUserProfile();
+    const msg = { type: "profile", name: p.name };
+    if (p.avatar) msg.avatar = p.avatar;
+    dc.send(JSON.stringify(msg));
+  } catch (e) {}
+}
+// 用户中心修改资料后：重发 profile
+onUserProfileChanged = sendMyProfile;
+
+// 立即把当前自己的位置回传给对端（分享模式发 WGS-84，查看模式发 GCJ-02）
+function sendMyLocationNow() {
+  if (!dc || dc.readyState !== "open" || !myPos) return;
+  if (mode === "share") {
+    dc.send(JSON.stringify(myPos));
+  } else if (mode === "view") {
+    const [lng, lat] = wgs84ToGcj02(myPos.lng, myPos.lat);
+    dc.send(JSON.stringify({
+      type: "loc", lat, lng,
+      heading: myPos.heading, acc: myPos.acc, t: Date.now(),
+    }));
+  }
+}
+
 function copyText(text) {
   navigator.clipboard.writeText(text).then(() => {
     alert("已复制：" + text);
@@ -624,3 +720,6 @@ function bindEvents() {
 initMap();
 bindEvents();
 startMyLocation();   // 进入页面即自动定位，显示自己的定位标
+renderUserEntry();   // 用户中心：左上角入口 + 改名/改头像
+bindUserCenterEvents();
+initCompass();       // 指南针：静止时方向指针也转动

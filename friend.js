@@ -21,6 +21,8 @@ let driverAvatarData = null; // 分享者头像 data URL（marker 未创建前�
 let driverName = null; // 分享者用户名（marker 未创建前暂存）
 let myMarker = null; // 好友自己位置
 let myPos = null; // 好友自己坐标(GCJ-02)
+let myHeading = null; // 好友自己的方向（指南针/GPS 融合，静止也转）
+let deviceHeading = null; // 设备指南针朝向
 let follow = false; // 是否跟随分享者（定位分享者模式）
 
 // 本好友会话的唯一 ID：分享者据此区分不同好友，支持多好友同时查看
@@ -170,6 +172,60 @@ function setDriverProfile(name, dataUrl) {
   applyDriverProfile();
 }
 
+// 把自己的资料（用户名 + 头像）推送给分享者，让分享者端显示我的名字/头像
+function sendMyProfile() {
+  if (!dc || dc.readyState !== "open") return;
+  try {
+    const p = getUserProfile();
+    const msg = { type: "profile", name: p.name };
+    if (p.avatar) msg.avatar = p.avatar;
+    dc.send(JSON.stringify(msg));
+  } catch (e) {}
+}
+// 用户中心修改资料后：重新推送
+onUserProfileChanged = sendMyProfile;
+
+// ========== 指南针（设备朝向）：静止时也让方向指针转动 ==========
+// 移动时 GPS heading 更准，静止时用设备指南针；两者融合成 myHeading。
+function initCompass() {
+  if (typeof DeviceOrientationEvent === "undefined") return;
+  const start = () => {
+    window.addEventListener(
+      "deviceorientation",
+      (e) => {
+        let deg = null;
+        if (e.absolute === false && e.webkitCompassHeading !== undefined) {
+          deg = 360 - e.webkitCompassHeading; // iOS：webkitCompassHeading 即方位角
+        } else if (e.alpha !== null && e.alpha !== undefined) {
+          deg = (360 - e.alpha) % 360;         // Android：alpha 相对北，顺时针
+        }
+        if (deg == null) return;
+        // 指数平滑（0.3），避免指针抖动
+        if (myHeading != null) {
+          let diff = deg - myHeading;
+          if (diff > 180) diff -= 360;
+          else if (diff < -180) diff += 360;
+          myHeading = (myHeading + diff * 0.3 + 360) % 360;
+        } else {
+          myHeading = deg;
+        }
+        deviceHeading = myHeading;
+      },
+      true
+    );
+  };
+  // iOS 13+ 需要用户手势授权
+  if (DeviceOrientationEvent.requestPermission) {
+    DeviceOrientationEvent.requestPermission()
+      .then((state) => {
+        if (state === "granted") start();
+      })
+      .catch(() => {});
+  } else {
+    start();
+  }
+}
+
 // 构建水滴外轮廓 Path d 字符串
 // 几何：尖顶(cx, cy-2r) → 右下切点(cx+r·cos30°, cy-r/2)
 //      → 顺时针大圆弧(经正南，240°) → 左下切点 → 闭合
@@ -226,6 +282,8 @@ function locateMe() {
         retries = 0;
         const [lng, lat] = wgs84ToGcj02(pos.coords.longitude, pos.coords.latitude);
         myPos = new AMap.LngLat(lng, lat);
+        // 方向：GPS 行进方向优先（移动时准确）；静止时用指南针（initCompass 融合）
+        if (pos.coords.heading != null) myHeading = Math.round(pos.coords.heading);
         if (!map) return;
         if (!myMarker) {
           myMarker = new AMap.Marker({
@@ -265,7 +323,7 @@ function sendMyLocation() {
         type: "loc",
         lat: myPos.lat,
         lng: myPos.lng,
-        heading: null,
+        heading: myHeading != null ? Math.round(myHeading) : null,
         acc: 0,
         t: Date.now(),
       })
@@ -341,6 +399,11 @@ async function init() {
   initMap();
   // 获取好友自己位置（可选，用于动态缩放）
   locateMe();
+  // 指南针：静止时方向指针也能转动
+  initCompass();
+  // 用户中心：左上角入口 + 改名/改头像
+  renderUserEntry();
+  bindUserCenterEvents();
   $("locBtn").addEventListener("click", toggleFollow);
 
   signaling = await connectSignaling("hereiam_" + code, onSignal);
@@ -375,7 +438,7 @@ async function onSignal(msg) {
       } catch (e) {}
     }
   } else if (msg.type === "bye") {
-    // 对方主动结束了共享：停止重连，明确提示（区别于网络断连）
+    // 对方主动结束了共享：停止重连，清除定位标，明确提示（区别于网络断连）
     setStatus("对方已结束共享，可关闭此页面", false);
     if (joinTimer) {
       clearInterval(joinTimer);
@@ -388,7 +451,30 @@ async function onSignal(msg) {
       pc = null;
       dc = null;
     }
+    removeDriverMarker();
   }
+}
+
+// 移除分享者定位标（对方结束共享时调用）
+function removeDriverMarker() {
+  if (driverMarker) {
+    try {
+      driverMarker.setMap(null);
+    } catch (e) {}
+    driverMarker = null;
+  }
+  driverArrowG = null;
+  driverAvatarImg = null;
+  driverNameEl = null;
+  driverAvatarData = null;
+  driverName = null;
+  follow = false;
+  const btn = $("locBtn");
+  if (btn) btn.classList.remove("active");
+  const tip = $("locTip");
+  if (tip) tip.classList.remove("show");
+  const addr = $("addr");
+  if (addr) addr.innerHTML = "好友位置将在这里显示";
 }
 
 async function handleOffer(offer) {
@@ -405,6 +491,10 @@ async function handleOffer(offer) {
   };
   pc.ondatachannel = (e) => {
     dc = e.channel;
+    dc.onopen = () => {
+      // 连接建立后把自己的资料（用户名+头像）推送给分享者（安卓端显示）
+      sendMyProfile();
+    };
     dc.onmessage = (ev) => {
       let m;
       try {
