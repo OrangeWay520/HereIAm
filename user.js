@@ -129,6 +129,7 @@ function setupCrop(img, dataUrl) {
   const imgEl = document.getElementById("cropImg");
   if (!stage || !imgEl) return;
   imgEl.src = dataUrl;
+  openCropStage(); // 必须先显示舞台再测量，否则 display:none 下 clientWidth/Height 为 0
   const sw = stage.clientWidth;
   const sh = stage.clientHeight;
   const pad = 20;
@@ -141,10 +142,9 @@ function setupCrop(img, dataUrl) {
   imgEl.style.top = dy + "px";
   imgEl.style.width = dw + "px";
   imgEl.style.height = dh + "px";
-  cropState = { nw: img.naturalWidth, nh: img.naturalHeight, dw: dw, dh: dh, dx: dx, dy: dy };
+  cropState = { nw: img.naturalWidth, nh: img.naturalHeight, dw: dw, dh: dh, dx: dx, dy: dy, srcImg: img };
   const fs = Math.min(dw, dh) * 0.7;
   setFrame(dx + (dw - fs) / 2, dy + (dh - fs) / 2, fs);
-  openCropStage();
 }
 
 // 设置/约束选区（限制在图片显示区域内）
@@ -167,7 +167,6 @@ function setFrame(x, y, s) {
 function confirmCrop() {
   if (!cropState) return;
   const st = cropState;
-  const imgEl = document.getElementById("cropImg");
   const imgScale = st.nw / st.dw;
   const sx = (st.fx - st.dx) * imgScale;
   const sy = (st.fy - st.dy) * imgScale;
@@ -176,7 +175,8 @@ function confirmCrop() {
   canvas.width = 128;
   canvas.height = 128;
   const ctx = canvas.getContext("2d");
-  ctx.drawImage(imgEl, sx, sy, ss, ss, 0, 0, 128, 128);
+  // 用预加载好的原图绘制，避免依赖 DOM 中 <img> 的解码状态
+  ctx.drawImage(st.srcImg, sx, sy, ss, ss, 0, 0, 128, 128);
   userProfile.avatar = canvas.toDataURL("image/jpeg", 0.8);
   const preview = document.getElementById("ucAvatarPreview");
   preview.src = userProfile.avatar;
@@ -184,35 +184,55 @@ function confirmCrop() {
   closeCropStage();
 }
 
-// 绑定裁剪手势：选区拖动（移动）+ 右下角手柄（缩放）
+function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+// 绑定裁剪手势：拖动选区移动 / 拖四角手柄缩放（对边固定，同主流裁剪 App）
 function bindCropGestures() {
   const frame = document.getElementById("cropFrame");
-  const handle = document.getElementById("cropHandle");
-  if (!frame || !handle) return;
+  if (!frame) return;
   let drag = null;
+  const end = () => { drag = null; frame.classList.remove("active"); };
+
   frame.addEventListener("pointerdown", (e) => {
-    if (e.target === handle) return;
     e.preventDefault();
-    drag = { mode: "move", sx: e.clientX, sy: e.clientY, ox: cropState.fx, oy: cropState.fy };
+    const corner = e.target.closest(".crop-corner");
     frame.setPointerCapture(e.pointerId);
+    const rect = frame.parentElement.getBoundingClientRect(); // 舞台在视口中的位置
+    if (corner) {
+      const c = corner.classList.contains("tl") ? "tl" :
+                corner.classList.contains("tr") ? "tr" :
+                corner.classList.contains("bl") ? "bl" : "br";
+      drag = { mode: "resize", corner: c, left: rect.left, top: rect.top };
+    } else {
+      drag = { mode: "move", sx: e.clientX, sy: e.clientY, ox: cropState.fx, oy: cropState.fy, left: rect.left, top: rect.top };
+    }
+    frame.classList.add("active");
   });
-  handle.addEventListener("pointerdown", (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    drag = { mode: "resize", sx: e.clientX, sy: e.clientY, os: cropState.fs };
-    handle.setPointerCapture(e.pointerId);
-  });
+
   frame.addEventListener("pointermove", (e) => {
     if (!drag || !cropState) return;
-    const dx = e.clientX - drag.sx;
-    const dy = e.clientY - drag.sy;
+    const st = cropState;
     if (drag.mode === "move") {
-      setFrame(drag.ox + dx, drag.oy + dy, cropState.fs);
-    } else {
-      setFrame(cropState.fx, cropState.fy, Math.max(40, drag.os + Math.max(dx, dy)));
+      setFrame(drag.ox + (e.clientX - drag.sx), drag.oy + (e.clientY - drag.sy), st.fs);
+      return;
     }
+    // 缩放：对边角固定，按拖拽角当前位置计算新边长（保持正方形）
+    let fxc, fyc; // 固定角坐标
+    if (drag.corner === "br") { fxc = st.fx; fyc = st.fy; }
+    else if (drag.corner === "tl") { fxc = st.fx + st.fs; fyc = st.fy + st.fs; }
+    else if (drag.corner === "tr") { fxc = st.fx; fyc = st.fy + st.fs; }
+    else { fxc = st.fx + st.fs; fyc = st.fy; } // bl
+    const cx = clamp(e.clientX - drag.left, st.dx, st.dx + st.dw);
+    const cy = clamp(e.clientY - drag.top, st.dy, st.dy + st.dh);
+    const s = clamp(Math.max(Math.abs(cx - fxc), Math.abs(cy - fyc)), 48, Math.min(st.dw, st.dh));
+    let x = fxc, y = fyc;
+    if (drag.corner === "br") { /* x,y 不变 */ }
+    else if (drag.corner === "tl") { x = fxc - s; y = fyc - s; }
+    else if (drag.corner === "tr") { x = fxc; y = fyc - s; }
+    else { x = fxc - s; y = fyc; } // bl
+    setFrame(x, y, s);
   });
-  const end = () => { drag = null; };
+
   frame.addEventListener("pointerup", end);
   frame.addEventListener("pointercancel", end);
 }
