@@ -10,9 +10,13 @@ const $ = (id) => document.getElementById(id);
 let map = null;
 let mode = "idle";              // "idle" | "share" | "view"
 let pc = null, dc = null, signaling = null;
-let watchId = null;             // 分享者定位 watch
 let shareCode = null;           // 分享口令
 let joinTimer = null;           // 查看者重发 join 定时器
+
+// 自己的位置（进入页面即自动定位，同 App 端）
+let myWatchId = null;           // 自己的定位 watch
+let myPos = null;               // 最新位置 {lat,lng,heading}
+let myMarker = null, myArrowG = null, myHasCentered = false;
 
 // 查看模式：好友定位标
 let driverMarker = null, driverArrowG = null;
@@ -94,10 +98,9 @@ function startView() {
 }
 
 function stopShare() {
-  if (watchId != null) navigator.geolocation.clearWatch(watchId);
+  // 注意：不清除 myWatchId —— 全局定位持续运行，地图继续显示自己的定位标
   if (pc) { try { pc.close(); } catch (e) {} pc = null; }
   if (signaling) { try { signaling.close(); } catch (e) {} signaling = null; }
-  if (signaling) signaling.close();
   shareCode = null;
   mode = "idle";
   setShareStatus("已停止共享", false);
@@ -181,39 +184,95 @@ async function onSignalShare(msg) {
   }
 }
 
-// 分享者：数据通道打开后开始定位上报
-function startLocationStream() {
-  if (!navigator.geolocation) { setShareStatus("当前浏览器不支持定位", false); return; }
+// ============================================================
+//  自己的位置：进入页面即自动定位（同 App 端），显示自己的水滴标
+// ============================================================
+function startMyLocation() {
+  if (!navigator.geolocation) { setIndicator(false); return; }
   let retries = 0;
   const startWatch = () => {
-    watchId = navigator.geolocation.watchPosition(
+    myWatchId = navigator.geolocation.watchPosition(
       (pos) => {
         retries = 0;
-        const m = {
+        myPos = {
           lat: pos.coords.latitude,
           lng: pos.coords.longitude,
           heading: pos.coords.heading != null ? Math.round(pos.coords.heading) : null,
           acc: Math.round(pos.coords.accuracy || 0),
           t: Date.now(),
         };
-        const accText = m.acc > 0 ? " · 精度约" + m.acc + "米" : "";
-        setShareStatus("已连接，正在实时上报位置" + accText, true);
-        if (dc && dc.readyState === "open") dc.send(JSON.stringify(m));
+        // 地图上更新自己的水滴定位标
+        updateMyMarker();
+        // 若正在分享且通道打开 → 实时上报好友
+        if (mode === "share" && dc && dc.readyState === "open") {
+          dc.send(JSON.stringify(myPos));
+        }
       },
       (err) => {
         retries++;
         if (retries <= 5) {
-          setShareStatus("定位获取中，正在重试(" + retries + "/5)…", false);
-          try { navigator.geolocation.clearWatch(watchId); } catch (e) {}
+          setIndicator(false);
           setTimeout(startWatch, 3000);
         } else {
-          setShareStatus("定位失败：" + err.message, false);
+          setIndicator(false);
         }
       },
       { enableHighAccuracy: true, maximumAge: 0, timeout: 8000 }
     );
   };
   startWatch();
+}
+
+// 在地图上显示/更新自己的水滴定位标
+function updateMyMarker() {
+  if (!map || !myPos) return;
+  const [lng, lat] = wgs84ToGcj02(myPos.lng, myPos.lat);
+  const pos = new AMap.LngLat(lng, lat);
+  if (!myMarker) {
+    const created = createDriverMarker(pos, myPos.heading);
+    myMarker = created.marker;
+    myArrowG = created.arrowG;
+    map.add(myMarker);
+    // 首次定位成功后自动把地图焦点移到当前位置
+    if (!myHasCentered) { myHasCentered = true; map.setCenter(pos); }
+  } else {
+    myMarker.setPosition(pos);
+    updateArrowG(myArrowG, myPos.heading);
+  }
+}
+
+// 定位按钮：回到自己位置
+function goToMyLocation() {
+  if (!map) return;
+  if (myPos) {
+    const [lng, lat] = wgs84ToGcj02(myPos.lng, myPos.lat);
+    map.setZoomAndCenter(16, new AMap.LngLat(lng, lat));
+  } else {
+    // 尚未定位成功，重新请求一次
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        myPos = {
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude,
+          heading: pos.coords.heading != null ? Math.round(pos.coords.heading) : null,
+          t: Date.now(),
+        };
+        updateMyMarker();
+        const [lng, lat] = wgs84ToGcj02(myPos.lng, myPos.lat);
+        map.setZoomAndCenter(16, new AMap.LngLat(lng, lat));
+      },
+      () => { setIndicator(false); },
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 8000 }
+    );
+  }
+}
+
+// 分享者：数据通道打开后立即上报当前定位（后续由 myWatch 实时驱动）
+function startLocationStream() {
+  if (!myPos) return;
+  const accText = myPos.acc > 0 ? " · 精度约" + myPos.acc + "米" : "";
+  setShareStatus("已连接，正在实时上报位置" + accText, true);
+  if (dc && dc.readyState === "open") dc.send(JSON.stringify(myPos));
 }
 
 // ============================================================
@@ -302,7 +361,7 @@ function onLocation(m) {
     if (!hasCentered) { hasCentered = true; map.setCenter(pos); }
   } else {
     driverMarker.setPosition(pos);
-    updateDriverArrow(m.heading);
+    updateArrowG(driverArrowG, m.heading);
   }
 }
 
@@ -355,9 +414,9 @@ function buildPointerPathD() {
     " Z";
 }
 
-function updateDriverArrow(heading) {
-  if (driverArrowG && heading != null) {
-    driverArrowG.setAttribute("transform", "rotate(" + heading + " " + M_CX + " " + M_CY + ")");
+function updateArrowG(g, heading) {
+  if (g && heading != null) {
+    g.setAttribute("transform", "rotate(" + heading + " " + M_CX + " " + M_CY + ")");
   }
 }
 
@@ -428,6 +487,7 @@ function copyText(text) {
 function bindEvents() {
   $("hiaBtn").addEventListener("click", onHiaClick);
   $("overlay").addEventListener("click", hideAllPanels);
+  $("locateBtn").addEventListener("click", goToMyLocation);
 
   $("optShare").addEventListener("click", startShare);
   $("optView").addEventListener("click", startView);
@@ -448,7 +508,7 @@ function bindEvents() {
 
   // 页面关闭时清理
   window.addEventListener("beforeunload", () => {
-    if (watchId != null) navigator.geolocation.clearWatch(watchId);
+    if (myWatchId != null) navigator.geolocation.clearWatch(myWatchId);
     if (joinTimer) clearInterval(joinTimer);
     if (pc) { try { pc.close(); } catch (e) {} }
     if (signaling) { try { signaling.close(); } catch (e) {} }
@@ -457,3 +517,4 @@ function bindEvents() {
 
 initMap();
 bindEvents();
+startMyLocation();   // 进入页面即自动定位，显示自己的定位标
