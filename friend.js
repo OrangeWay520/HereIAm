@@ -19,10 +19,14 @@ let driverAvatarImg = null; // 分享者定位标内的头像(<image>)
 let driverNameEl = null; // 分享者名字气泡
 let driverAvatarData = null; // 分享者头像 data URL（marker 未创建前暂存）
 let driverName = null; // 分享者用户名（marker 未创建前暂存）
-let myMarker = null; // 好友自己位置
+let myMarker = null; // 好友自己位置（水滴 + 指南针指针）
+let myArrowG = null; // 好友自己定位标内的方向指针(<g>)
+let myHasCentered = false;
 let myPos = null; // 好友自己坐标(GCJ-02)
 let myHeading = null; // 好友自己的方向（指南针/GPS 融合，静止也转）
 let deviceHeading = null; // 设备指南针朝向
+let lastArrowUpdate = 0; // 指南针刷新节流
+let lastLocSend = 0; // 方向回传节流
 let follow = false; // 是否跟随分享者（定位分享者模式）
 
 // 本好友会话的唯一 ID：分享者据此区分不同好友，支持多好友同时查看
@@ -210,6 +214,16 @@ function initCompass() {
           myHeading = deg;
         }
         deviceHeading = myHeading;
+        // 静止时：节流驱动自己定位标指针旋转 + 定期回传方向给分享者
+        const now = Date.now();
+        if (now - lastArrowUpdate >= 80) {
+          lastArrowUpdate = now;
+          updateMyArrow(myHeading);
+        }
+        if (now - lastLocSend >= 500) {
+          lastLocSend = now;
+          if (dc && dc.readyState === "open") sendMyLocation();
+        }
       },
       true
     );
@@ -266,6 +280,16 @@ function updateDriverArrow(heading) {
   }
 }
 
+// 更新自己定位标的方向指针（与分享者定位标同规格）
+function updateMyArrow(heading) {
+  if (myArrowG && heading != null) {
+    myArrowG.setAttribute(
+      "transform",
+      "rotate(" + heading + " " + M_CX + " " + M_CY + ")"
+    );
+  }
+}
+
 // ============================================================
 //  好友自己的位置（用于计算分享者-好友距离做动态缩放 + 双向共享）
 //  用 watchPosition 持续监听：不仅拿到首次定位，还会随移动持续更新，
@@ -286,16 +310,15 @@ function locateMe() {
         if (pos.coords.heading != null) myHeading = Math.round(pos.coords.heading);
         if (!map) return;
         if (!myMarker) {
-          myMarker = new AMap.Marker({
-            position: myPos,
-            content: '<div style="width:14px;height:14px;border-radius:50%;' +
-              'background:#22c55e;border:2px solid #fff;box-shadow:0 0 4px rgba(0,0,0,.3);"></div>',
-            offset: new AMap.Pixel(-7, -7),
-            zIndex: 110,
-          });
+          // 自己的定位标：水滴 + 指南针指针（与安卓端一致）
+          const created = createDriverMarker(myPos, myHeading || 0);
+          myMarker = created.marker;
+          myArrowG = created.arrowG;
           map.add(myMarker);
+          if (!myHasCentered) { myHasCentered = true; map.setCenter(myPos); }
         } else {
           myMarker.setPosition(myPos);
+          updateMyArrow(myHeading);
         }
       },
       () => {

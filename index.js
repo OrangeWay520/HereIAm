@@ -18,6 +18,9 @@ let joinTimer = null;           // 查看者重发 join 定时器
 let myWatchId = null;           // 自己的定位 watch
 let myPos = null;               // 最新位置 {lat,lng,heading}
 let deviceHeading = null;       // 设备指南针朝向（静止时方向指针也转）
+let geoHeadingAvailable = false; // GPS 是否提供行进方向（移动时优先用 GPS）
+let lastCompassUpdate = 0;      // 指南针刷新节流
+let lastCompassSend = 0;        // 方向回传节流
 let myMarker = null, myArrowG = null, myHasCentered = false;
 
 // 查看模式：好友定位标
@@ -224,6 +227,7 @@ function startMyLocation() {
       (pos) => {
         retries = 0;
         // 方向：GPS 行进方向优先（移动时准确）；静止时用设备指南针（initCompass 融合）
+        geoHeadingAvailable = pos.coords.heading != null;
         let heading = pos.coords.heading != null ? Math.round(pos.coords.heading) : null;
         if (heading == null && deviceHeading != null) heading = Math.round(deviceHeading);
         myPos = {
@@ -622,11 +626,18 @@ function initCompass() {
         } else {
           deviceHeading = deg;
         }
-        // 静止时（无 GPS heading）用指南针驱动自己的定位标
-        if (myPos && myPos.heading == null) {
+        // 静止时（无 GPS 行进方向）用指南针驱动自己的定位标，指针随设备转动（节流）
+        if (!geoHeadingAvailable && myPos) {
           myPos.heading = Math.round(deviceHeading);
-          updateMyMarker();
-          if (dc && dc.readyState === "open") sendMyLocationNow();
+          const now = Date.now();
+          if (now - lastCompassUpdate >= 80) {
+            lastCompassUpdate = now;
+            updateMyMarker();
+          }
+          if (now - lastCompassSend >= 500) {
+            lastCompassSend = now;
+            if (dc && dc.readyState === "open") sendMyLocationNow();
+          }
         }
       },
       true
