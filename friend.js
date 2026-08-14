@@ -21,6 +21,8 @@ let driverAvatarData = null; // 分享者头像 data URL（marker 未创建前�
 let driverName = null; // 分享者用户名（marker 未创建前暂存）
 let myMarker = null; // 好友自己位置（水滴 + 指南针指针）
 let myArrowG = null; // 好友自己定位标内的方向指针(<g>)
+// 好友自己定位标颜色元素（灰/蓝切换用）
+let myGlow = null, myPtr = null, myDisc = null;
 let myHasCentered = false;
 let myPos = null; // 好友自己坐标(GCJ-02)
 let myHeading = null; // 好友自己的方向（指南针/GPS 融合，静止也转）
@@ -28,6 +30,12 @@ let deviceHeading = null; // 设备指南针朝向
 let lastArrowUpdate = 0; // 指南针刷新节流
 let lastLocSend = 0; // 方向回传节流
 let follow = false; // 是否跟随分享者（定位分享者模式）
+// 自己定位信号状态：true=信号不佳（灰色定位标），false=已精确定位（蓝色）。
+// 灰色时仍持续回传朝向（灰不影响手机朝向信号发送），信号恢复后自动转回蓝色。
+let myGray = false;
+let lastFixTime = 0; // 最后一次成功定位的时间戳（信号看门狗用）
+// 分享者定位标颜色元素（灰/蓝切换用）
+let driverGlow = null, driverPtr = null, driverDisc = null;
 
 // 本好友会话的唯一 ID：分享者据此区分不同好友，支持多好友同时查看
 const friendId =
@@ -116,15 +124,15 @@ function createDriverMarker(pos, heading) {
     // 整个旋转层绕初始圆圆心 M_CX,M_CY 旋转
     '<g id="arrowG" transform="rotate(' + (heading || 0) + " " + M_CX + " " + M_CY + ')">' +
     // 1. 蓝色发散光晕（单层淡蓝 + 模糊，隐隐发散，替代灰色阴影）
-    '<path d="' + buildWaterdropPathD(M_R_WHITE) + '" fill="none" stroke="rgba(47,134,246,0.28)" stroke-width="' + (5 * M_SCALE).toFixed(2) + '" stroke-linejoin="round" filter="url(#glowF)"/>' +
+    '<path id="glowPath" d="' + buildWaterdropPathD(M_R_WHITE) + '" fill="none" stroke="rgba(47,134,246,0.28)" stroke-width="' + (5 * M_SCALE).toFixed(2) + '" stroke-linejoin="round" filter="url(#glowF)"/>' +
     // 2. 白色底层水滴（r = R+W = 25.5，外圈白色轮廓，无灰色描边）
     '<path d="' + buildWaterdropPathD(M_R_WHITE) + '" fill="#ffffff"/>' +
     // 3. 蓝色指针（圆外切线区域：尖顶 + 两切点围成的三角形，随旋转层旋转）
-    '<path d="' + buildPointerPathD() + '" fill="rgba(47,134,246,0.96)"/>' +
+    '<path id="ptrPath" d="' + buildPointerPathD() + '" fill="rgba(47,134,246,0.96)"/>' +
     "</g>" +
     // ========== 固定层（圆盘 + 白色圆周线，永不旋转，预留头像位）==========
     // 4. 蓝色圆盘（初始圆内区域，后续可放个性化头像）
-    '<circle cx="' + M_CX + '" cy="' + M_CY + '" r="' + M_R.toFixed(2) + '" fill="rgba(47,134,246,0.96)"/>' +
+    '<circle id="discPath" cx="' + M_CX + '" cy="' + M_CY + '" r="' + M_R.toFixed(2) + '" fill="rgba(47,134,246,0.96)"/>' +
     // 4b. 分享者头像（若有则覆盖在圆盘上，圆形裁剪）
     '<clipPath id="avatarClip"><circle cx="' + M_CX + '" cy="' + M_CY + '" r="' + M_AVATAR_R.toFixed(2) + '"/></clipPath>' +
     '<image id="avatarImg" x="' + (M_CX - M_AVATAR_R).toFixed(2) + '" y="' + (M_CY - M_AVATAR_R).toFixed(2) +
@@ -152,7 +160,29 @@ function createDriverMarker(pos, heading) {
   content.appendChild(nameEl);
   const arrowG = content.querySelector("#arrowG");
   const avatarImg = content.querySelector("#avatarImg");
-  return { marker, arrowG, avatarImg, nameEl };
+  return {
+    marker, arrowG, avatarImg, nameEl,
+    glowPath: content.querySelector("#glowPath"),
+    ptrPath: content.querySelector("#ptrPath"),
+    discPath: content.querySelector("#discPath"),
+  };
+}
+
+// 切换分享者定位标颜色（蓝/灰与分享者定位信号状态同步）
+// 蓝色 rgba(47,134,246,…)（高德定位指针），灰色 rgba(154,163,175,…)（与安卓 #9AA3AF 一致）
+function setDriverLocated(gray) {
+  const rgb = gray ? "154,163,175" : "47,134,246";
+  if (driverGlow) driverGlow.setAttribute("stroke", "rgba(" + rgb + ",0.28)");
+  if (driverPtr) driverPtr.setAttribute("fill", "rgba(" + rgb + ",0.96)");
+  if (driverDisc) driverDisc.setAttribute("fill", "rgba(" + rgb + ",0.96)");
+}
+
+// 切换自己定位标颜色（蓝/灰与自己的定位信号状态同步；灰不影响朝向指针转动）
+function setMyLocated(gray) {
+  const rgb = gray ? "154,163,175" : "47,134,246";
+  if (myGlow) myGlow.setAttribute("stroke", "rgba(" + rgb + ",0.28)");
+  if (myPtr) myPtr.setAttribute("fill", "rgba(" + rgb + ",0.96)");
+  if (myDisc) myDisc.setAttribute("fill", "rgba(" + rgb + ",0.96)");
 }
 
 // 应用分享者资料（用户名 + 头像）到定位标
@@ -312,6 +342,11 @@ function locateMe() {
     locationWatchId = navigator.geolocation.watchPosition(
       (pos) => {
         retries = 0;
+        // 记录定位时间：信号看门狗据此判定「定位信号不佳」（5 秒无新位置 → 灰色）
+        lastFixTime = Date.now();
+        myGray = false;
+        // 定位恢复 → 自己的定位标转回蓝色（未创建前标记在创建时应用）
+        if (myMarker) setMyLocated(false);
         myPosWgs = { lat: pos.coords.latitude, lng: pos.coords.longitude };
         const [lng, lat] = wgs84ToGcj02(pos.coords.longitude, pos.coords.latitude);
         myPos = new AMap.LngLat(lng, lat);
@@ -325,11 +360,16 @@ function locateMe() {
           const created = createDriverMarker(myPos, myHeading || 0);
           myMarker = created.marker;
           myArrowG = created.arrowG;
+          myGlow = created.glowPath;
+          myPtr = created.ptrPath;
+          myDisc = created.discPath;
           map.add(myMarker);
+          setMyLocated(myGray);
           if (!myHasCentered) { myHasCentered = true; map.setCenter(myPos); }
         } else {
           myMarker.setPosition(myPos);
           updateMyArrow(myHeading);
+          setMyLocated(myGray);
         }
       },
       () => {
@@ -348,7 +388,7 @@ function locateMe() {
 }
 
 // 双向共享：把自己的位置（WGS-84，对称协议）定期通过数据通道回传给分享者，
-// 让分享者首页地图也能实时看到好友（接收端）的位置。
+// 让分享者首页地图也能实时看到好友（接收端）的位置。含 gray 字段（灰不影响朝向发送）。
 function sendMyLocation() {
   if (!dc || dc.readyState !== "open" || !myPosWgs) return;
   try {
@@ -360,11 +400,28 @@ function sendMyLocation() {
         heading: myHeading != null ? Math.round(myHeading) : null,
         acc: 0,
         t: Date.now(),
+        gray: myGray,
       })
     );
   } catch (e) {}
 }
 setInterval(sendMyLocation, 3000);
+
+// 定位信号看门狗：持续 5 秒无新位置 → 判定定位信号不佳，回传灰色给分享者。
+// 灰色时指南针(initCompass)仍在持续回传朝向（sendMyLocation 每 500ms 一次），
+// 因此灰色只影响定位标颜色，不影响朝向指针转动；恢复定位后立即转回蓝色。
+function startGrayWatchdog() {
+  setInterval(() => {
+    if (!myPosWgs || lastFixTime <= 0) return;
+    if (!myGray && Date.now() - lastFixTime > 5000) {
+      myGray = true;
+      // 自己的定位标同步变灰（灰不影响朝向指针转动，指针仍按指南针旋转）
+      setMyLocated(true);
+      // 变灰瞬间回传一次灰色定位（含最后位置 + 当前朝向），分享者同步显示灰色定位标
+      sendMyLocation();
+    }
+  }, 3000);
+}
 
 // 两点球面距离（米）
 function distanceM(a, b) {
@@ -433,6 +490,8 @@ async function init() {
   initMap();
   // 获取好友自己位置（可选，用于动态缩放）
   locateMe();
+  // 定位信号看门狗：无新位置 5 秒 → 置灰并回传灰色（灰不影响朝向信号发送）
+  startGrayWatchdog();
   // 指南针：静止时方向指针也能转动
   initCompass();
   // 用户中心：左上角入口 + 改名/改头像
@@ -635,13 +694,18 @@ function onLocation(m) {
   // 关键：浏览器定位是 WGS-84，高德是 GCJ-02，转换后消除几百米偏移
   const [lng, lat] = wgs84ToGcj02(m.lng, m.lat);
   const pos = new AMap.LngLat(lng, lat);
+  const gray = !!m.gray;   // 分享者定位信号不佳（灰色定位标），灰色时指针仍按 heading 转动
   if (!driverMarker) {
     const created = createDriverMarker(pos, m.heading);
     driverMarker = created.marker;
     driverArrowG = created.arrowG;
     driverAvatarImg = created.avatarImg;
     driverNameEl = created.nameEl;
+    driverGlow = created.glowPath;
+    driverPtr = created.ptrPath;
+    driverDisc = created.discPath;
     map.add(driverMarker);
+    setDriverLocated(gray);
     // 若资料在位置之前到达，此处补上名字/头像
     applyDriverProfile();
     // 连接成功后自动把地图焦点移到分享者所在区域，不用好友自己找
@@ -650,6 +714,7 @@ function onLocation(m) {
   } else {
     driverMarker.setPosition(pos);
     updateDriverArrow(m.heading);
+    setDriverLocated(gray);
   }
 
   // 跟随模式下：分享者位置放中心 + 按距离动态缩放

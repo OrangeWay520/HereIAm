@@ -16,17 +16,25 @@ let joinTimer = null;           // 查看者重发 join 定时器
 
 // 自己的位置（进入页面即自动定位，同 App 端）
 let myWatchId = null;           // 自己的定位 watch
-let myPos = null;               // 最新位置 {lat,lng,heading}
+let myPos = null;               // 最新位置 {lat,lng,heading,acc,t,gray}
 let deviceHeading = null;       // 设备指南针朝向（真北，实时更新）
 let lastCompassUpdate = 0;      // 指南针刷新节流
 let lastCompassSend = 0;        // 方向回传节流
 let myMarker = null, myArrowG = null, myHasCentered = false;
+// 自己定位标颜色元素（灰/蓝切换用）
+let myGlow = null, myPtr = null, myDisc = null;
+// 自己定位信号状态：true=信号不佳（灰色定位标），false=已精确定位（蓝色）。
+// 灰色时仍持续回传朝向（灰不影响手机朝向信号发送），信号恢复后自动转回蓝色。
+let myGray = false;
+let lastFixTime = 0;            // 最后一次成功定位的时间戳（信号看门狗用）
 
 // 查看模式：好友定位标
 let driverMarker = null, driverArrowG = null;
 let driverAvatarImg = null, driverNameEl = null;
 let driverAvatarData = null, driverName = null; // 分享者资料暂存（marker 未创建前）
 let hasCentered = false;
+// 对端定位标颜色元素（灰/蓝切换用）
+let driverGlow = null, driverPtr = null, driverDisc = null;
 
 // 本好友会话唯一 ID（查看模式用）
 const friendId = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
@@ -34,7 +42,7 @@ const friendId = Math.random().toString(36).slice(2, 10) + Date.now().toString(3
 // ========== 顶部用户选择器 / 定位按钮状态（同安卓 App） ==========
 // 当前跟随目标："me"=自己位置居中 / "friend"=对端好友位置居中 / null=不跟随
 let followTarget = "me";
-// 定位按钮状态：0=聚焦目标（居中放大）, 1=总览全部（缩小显示所有人）, 2=复位朝北（bearing/tilt 归零）；点击循环切换
+// 定位按钮状态：0=聚焦目标（居中放大+朝北）, 1=总览全部（缩小显示所有人+朝北）；点击循环切换
 let locStep = 0;
 // 总览模式：定位键切到「总览全部」时置 true，暂停自动跟随；不改变用户选择框的选中项
 let overviewMode = false;
@@ -255,6 +263,11 @@ function startMyLocation() {
     myWatchId = navigator.geolocation.watchPosition(
       (pos) => {
         retries = 0;
+        // 记录定位时间：信号看门狗据此判定「定位信号不佳」（5 秒无新位置 → 灰色）
+        lastFixTime = Date.now();
+        myGray = false;
+        // 定位恢复 → 自己的定位标转回蓝色（未创建前标记在 updateMyMarker 里应用）
+        if (myMarker) setMyLocated(false);
         // 方向：指南针优先（实时、静止也转）；无指南针时退回 GPS 行进方向
         let heading = deviceHeading != null
           ? Math.round(deviceHeading)
@@ -265,20 +278,22 @@ function startMyLocation() {
           heading: heading,
           acc: Math.round(pos.coords.accuracy || 0),
           t: Date.now(),
+          gray: myGray,
         };
         // 地图上更新自己的水滴定位标
         updateMyMarker();
         // 双向共享：数据通道打开时把自己的位置实时回传对方
         if (dc && dc.readyState === "open") {
           if (mode === "share") {
-            // 分享模式：发送 WGS-84，好友端(friend.js)统一转 GCJ-02
+            // 分享模式：发送 WGS-84，好友端(friend.js)统一转 GCJ-02；含 gray 字段
             dc.send(JSON.stringify(myPos));
           } else if (mode === "view") {
-            // 查看模式：对称协议，发送 WGS-84，安卓端统一转 GCJ-02 后显示
+            // 查看模式：对称协议，发送 WGS-84，安卓端统一转 GCJ-02 后显示；含 gray 字段
             dc.send(JSON.stringify({
               type: "loc",
               lat: myPos.lat, lng: myPos.lng,
               heading: myPos.heading, acc: myPos.acc, t: Date.now(),
+              gray: myPos.gray,
             }));
           }
         }
@@ -298,6 +313,24 @@ function startMyLocation() {
   startWatch();
 }
 
+// ========== 定位信号看门狗（同安卓端）==========
+// 持续 5 秒无新位置 → 判定定位信号不佳，把自己的定位标置灰并回传灰色给对端。
+// 灰色时指南针(initCompass)仍在持续回传朝向（sendMyLocationNow 每 500ms 一次），
+// 因此灰色只影响定位标颜色，不影响朝向指针转动；恢复定位后立即转回蓝色。
+function startGrayWatchdog() {
+  setInterval(() => {
+    if (!myPos || lastFixTime <= 0) return;
+    if (!myGray && Date.now() - lastFixTime > 5000) {
+      myGray = true;
+      myPos.gray = true;
+      // 自己的定位标同步变灰（灰不影响朝向指针转动，指针仍按指南针旋转）
+      setMyLocated(true);
+      // 变灰瞬间回传一次灰色定位（含最后位置 + 当前朝向），对方同步显示灰色定位标
+      sendMyLocationNow();
+    }
+  }, 3000);
+}
+
 // 在地图上显示/更新自己的水滴定位标
 function updateMyMarker() {
   if (!map || !myPos) return;
@@ -307,12 +340,17 @@ function updateMyMarker() {
     const created = createDriverMarker(pos, myPos.heading);
     myMarker = created.marker;
     myArrowG = created.arrowG;
+    myGlow = created.glowPath;
+    myPtr = created.ptrPath;
+    myDisc = created.discPath;
     map.add(myMarker);
+    setMyLocated(myGray);
     // 首次定位成功后自动把地图焦点移到当前位置
     if (!myHasCentered) { myHasCentered = true; map.setCenter(pos); }
   } else {
     myMarker.setPosition(pos);
     updateArrowG(myArrowG, myPos.heading);
+    setMyLocated(myGray);
   }
   // 跟随自己：位置真正变化时自动居中（保留当前缩放，总览模式下暂停，同安卓 App）
   if (followTarget === "me" && !overviewMode) {
@@ -326,38 +364,43 @@ function updateMyMarker() {
 }
 
 // ============================================================
-//  定位按钮（右下角）：点击循环切换「聚焦目标」/「总览全部」/「复位朝北」（同安卓 App）
+//  定位按钮（右下角）：点击循环切换「聚焦目标」/「总览全部」（同安卓 App）
+//  每次点击都同时把地图调整到正北（rotation=0、tilt=0），没有单独的朝北操作。
 //  注意：聚焦/总览不改变用户选择框的选中项（followTarget 仅由选择器修改）
 // ============================================================
 function onLocateClick() {
   if (!map) return;
-  locStep = (locStep + 1) % 3;
-  switch (locStep) {
-    case 0: {
-      // 聚焦：将选中的人居中放大
-      overviewMode = false;
-      let target = null;
-      if (followTarget === "friend" && driverMarker) {
-        target = driverMarker.getPosition();
-      } else if (myPos) {
-        const [lng, lat] = wgs84ToGcj02(myPos.lng, myPos.lat);
-        target = new AMap.LngLat(lng, lat);
-      }
-      if (target) map.setZoomAndCenter(16, target);
-      break;
+  locStep = (locStep + 1) % 2;
+  if (locStep === 0) {
+    // 聚焦：将选中的人居中放大 + 地图调回正北
+    overviewMode = false;
+    let target = null;
+    if (followTarget === "friend" && driverMarker) {
+      target = driverMarker.getPosition();
+    } else if (myPos) {
+      const [lng, lat] = wgs84ToGcj02(myPos.lng, myPos.lat);
+      target = new AMap.LngLat(lng, lat);
     }
-    case 1: {
-      // 总览：缩小显示全部（不改变 followTarget，让用户选择框保持选中状态）
-      overviewMode = true;
-      fitAllPositions();
-      break;
+    if (target) {
+      setCameraNorth(16, target);
     }
-    default: {
-      // 复位朝北：地图恢复朝正北（rotation=0、tilt=0），保持当前中心和缩放
-      overviewMode = false;
-      resetMapNorth();
-      break;
-    }
+  } else {
+    // 总览：缩小显示全部 + 地图调回正北（不改变 followTarget，让用户选择框保持选中状态）
+    overviewMode = true;
+    fitAllPositions();
+    resetMapNorth();
+  }
+}
+
+// 聚焦/总览都带「朝正北」：同时设置中心、缩放、朝向归零
+function setCameraNorth(zoom, center) {
+  if (!map) return;
+  if (typeof map.setCameraPosition === "function") {
+    map.setCameraPosition({ target: center, zoom: zoom, tilt: 0, rotation: 0 });
+  } else {
+    if (map.setRotation) map.setRotation(0);
+    if (map.setTilt) map.setTilt(0);
+    map.setZoomAndCenter(zoom, center);
   }
 }
 
@@ -481,6 +524,9 @@ function removeDriverMarker() {
   driverNameEl = null;
   driverAvatarData = null;
   driverName = null;
+  driverGlow = null;
+  driverPtr = null;
+  driverDisc = null;
   hasCentered = false;
 }
 
@@ -528,11 +574,12 @@ async function handleOffer(offer) {
 // 收到分享者位置（WGS-84）→ 转 GCJ-02 后在地图上显示水滴标记
 function onLocation(m) {
   const [lng, lat] = wgs84ToGcj02(m.lng, m.lat);
-  showDriverAt(new AMap.LngLat(lng, lat), m.heading);
+  showDriverAt(new AMap.LngLat(lng, lat), m.heading, !!m.gray);
 }
 
 // 在地图上放置/更新对方定位标（对方 = 被查看的分享者 或 查看者）
-function showDriverAt(pos, heading) {
+// @param gray true=对方定位信号不佳（灰色定位标），false=已精确定位（蓝色）；灰色时指针仍按 heading 转动
+function showDriverAt(pos, heading, gray) {
   if (!map) return;
   if (!driverMarker) {
     const created = createDriverMarker(pos, heading);
@@ -540,13 +587,18 @@ function showDriverAt(pos, heading) {
     driverArrowG = created.arrowG;
     driverAvatarImg = created.avatarImg;
     driverNameEl = created.nameEl;
+    driverGlow = created.glowPath;
+    driverPtr = created.ptrPath;
+    driverDisc = created.discPath;
     map.add(driverMarker);
+    setDriverLocated(gray);
     // 若资料在位置之前到达，此处补上名字/头像
     applyDriverProfile();
     if (!hasCentered) { hasCentered = true; map.setCenter(pos); }
   } else {
     driverMarker.setPosition(pos);
     updateArrowG(driverArrowG, heading);
+    setDriverLocated(gray);
   }
   // 跟随好友：位置更新自动居中（保留当前缩放，总览模式下暂停，同安卓 App）
   if (followTarget === "friend" && !overviewMode) {
@@ -572,11 +624,11 @@ function createDriverMarker(pos, heading) {
     '<defs><filter id="glowF" x="-80%" y="-80%" width="260%" height="260%">' +
     '<feGaussianBlur stdDeviation="' + (2.2 * M_SCALE).toFixed(2) + '"/></filter></defs>' +
     '<g id="arrowG" transform="rotate(' + (heading || 0) + " " + M_CX + " " + M_CY + ')">' +
-    '<path d="' + buildWaterdropPathD(M_R_WHITE) + '" fill="none" stroke="rgba(47,134,246,0.28)" stroke-width="' + (5 * M_SCALE).toFixed(2) + '" stroke-linejoin="round" filter="url(#glowF)"/>' +
+    '<path id="glowPath" d="' + buildWaterdropPathD(M_R_WHITE) + '" fill="none" stroke="rgba(47,134,246,0.28)" stroke-width="' + (5 * M_SCALE).toFixed(2) + '" stroke-linejoin="round" filter="url(#glowF)"/>' +
     '<path d="' + buildWaterdropPathD(M_R_WHITE) + '" fill="#ffffff"/>' +
-    '<path d="' + buildPointerPathD() + '" fill="rgba(47,134,246,0.96)"/>' +
+    '<path id="ptrPath" d="' + buildPointerPathD() + '" fill="rgba(47,134,246,0.96)"/>' +
     "</g>" +
-    '<circle cx="' + M_CX + '" cy="' + M_CY + '" r="' + M_R.toFixed(2) + '" fill="rgba(47,134,246,0.96)"/>' +
+    '<circle id="discPath" cx="' + M_CX + '" cy="' + M_CY + '" r="' + M_R.toFixed(2) + '" fill="rgba(47,134,246,0.96)"/>' +
     // 分享者头像（覆盖在圆盘上，圆形裁剪）
     '<clipPath id="avatarClip"><circle cx="' + M_CX + '" cy="' + M_CY + '" r="' + M_AVATAR_R.toFixed(2) + '"/></clipPath>' +
     '<image id="avatarImg" x="' + (M_CX - M_AVATAR_R).toFixed(2) + '" y="' + (M_CY - M_AVATAR_R).toFixed(2) +
@@ -603,7 +655,27 @@ function createDriverMarker(pos, heading) {
     arrowG: content.querySelector("#arrowG"),
     avatarImg: content.querySelector("#avatarImg"),
     nameEl: nameEl,
+    glowPath: content.querySelector("#glowPath"),
+    ptrPath: content.querySelector("#ptrPath"),
+    discPath: content.querySelector("#discPath"),
   };
+}
+
+// 切换对端定位标颜色（蓝/灰与对端定位信号状态同步）
+// 蓝色 rgba(47,134,246,…)（高德定位指针），灰色 rgba(154,163,175,…)（与安卓 #9AA3AF 一致）
+function setDriverLocated(gray) {
+  const rgb = gray ? "154,163,175" : "47,134,246";
+  if (driverGlow) driverGlow.setAttribute("stroke", "rgba(" + rgb + ",0.28)");
+  if (driverPtr) driverPtr.setAttribute("fill", "rgba(" + rgb + ",0.96)");
+  if (driverDisc) driverDisc.setAttribute("fill", "rgba(" + rgb + ",0.96)");
+}
+
+// 切换自己定位标颜色（蓝/灰与自己的定位信号状态同步；灰不影响朝向指针转动）
+function setMyLocated(gray) {
+  const rgb = gray ? "154,163,175" : "47,134,246";
+  if (myGlow) myGlow.setAttribute("stroke", "rgba(" + rgb + ",0.28)");
+  if (myPtr) myPtr.setAttribute("fill", "rgba(" + rgb + ",0.96)");
+  if (myDisc) myDisc.setAttribute("fill", "rgba(" + rgb + ",0.96)");
 }
 
 // 应用分享者资料（用户名 + 头像）到定位标
@@ -885,12 +957,13 @@ onUserProfileChanged = sendMyProfile;
 function sendMyLocationNow() {
   if (!dc || dc.readyState !== "open" || !myPos) return;
   if (mode === "share") {
-    dc.send(JSON.stringify(myPos));
+    dc.send(JSON.stringify(myPos));   // 含 gray 字段
   } else if (mode === "view") {
     dc.send(JSON.stringify({
       type: "loc",
       lat: myPos.lat, lng: myPos.lng,
       heading: myPos.heading, acc: myPos.acc, t: Date.now(),
+      gray: myPos.gray,
     }));
   }
 }
@@ -945,6 +1018,7 @@ function bindEvents() {
 initMap();
 bindEvents();
 startMyLocation();   // 进入页面即自动定位，显示自己的定位标
+startGrayWatchdog(); // 定位信号看门狗：无新位置 5 秒 → 置灰并回传灰色
 renderUserEntry();   // 用户中心：左上角入口 + 改名/改头像
 bindUserCenterEvents();
 initUserSelector();  // 顶部用户选择器（同安卓 App）
