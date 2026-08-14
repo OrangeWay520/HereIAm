@@ -16,6 +16,9 @@ let map = null;
 let driverMarker = null; // 分享者定位标
 let driverArrowG = null; // 分享者定位标内的三角形指针(<g>)
 let driverAvatarImg = null; // 分享者定位标内的头像(<image>)
+let driverNameEl = null; // 分享者名字气泡
+let driverAvatarData = null; // 分享者头像 data URL（marker 未创建前暂存）
+let driverName = null; // 分享者用户名（marker 未创建前暂存）
 let myMarker = null; // 好友自己位置
 let myPos = null; // 好友自己坐标(GCJ-02)
 let follow = false; // 是否跟随分享者（定位分享者模式）
@@ -132,17 +135,37 @@ function createDriverMarker(pos, heading) {
     offset: new AMap.Pixel(-M_CX, -M_CY),
     zIndex: 120,
   });
+  // 分享者名字气泡（显示在地标上方，指向水滴尖端）
+  const nameEl = document.createElement("div");
+  nameEl.id = "driverName";
+  nameEl.style.cssText =
+    "position:absolute;top:-16px;left:50%;transform:translateX(-50%);" +
+    "max-width:140px;padding:2px 8px;border-radius:10px;background:rgba(26,26,46,0.75);" +
+    "color:#fff;font-size:11px;line-height:16px;white-space:nowrap;overflow:hidden;" +
+    "text-overflow:ellipsis;display:none;pointer-events:none;";
+  content.appendChild(nameEl);
   const arrowG = content.querySelector("#arrowG");
   const avatarImg = content.querySelector("#avatarImg");
-  return { marker, arrowG, avatarImg };
+  return { marker, arrowG, avatarImg, nameEl };
 }
 
-// 显示分享者头像（数据通道推送的 data URL）
-function setDriverAvatar(dataUrl) {
-  if (!dataUrl) return;
-  if (!driverAvatarImg) return;
-  driverAvatarImg.setAttribute("href", dataUrl);
-  driverAvatarImg.style.display = "block";
+// 应用分享者资料（用户名 + 头像）到定位标
+function applyDriverProfile() {
+  if (driverNameEl && driverName) {
+    driverNameEl.textContent = driverName;
+    driverNameEl.style.display = "block";
+  }
+  if (driverAvatarImg && driverAvatarData) {
+    driverAvatarImg.setAttribute("href", driverAvatarData);
+    driverAvatarImg.style.display = "block";
+  }
+}
+
+// 显示分享者资料（数据通道推送的 profile 消息）
+function setDriverProfile(name, dataUrl) {
+  if (name) driverName = name;
+  if (dataUrl) driverAvatarData = dataUrl;
+  applyDriverProfile();
 }
 
 // 构建水滴外轮廓 Path d 字符串
@@ -213,6 +236,25 @@ function locateMe() {
     { enableHighAccuracy: true, maximumAge: 0, timeout: 8000 }
   );
 }
+
+// 双向共享：把自己的位置（GCJ-02）定期通过数据通道回传给分享者，
+// 让分享者首页地图也能实时看到好友（接收端）的位置。
+function sendMyLocation() {
+  if (!dc || dc.readyState !== "open" || !myPos) return;
+  try {
+    dc.send(
+      JSON.stringify({
+        type: "loc",
+        lat: myPos.lat,
+        lng: myPos.lng,
+        heading: null,
+        acc: 0,
+        t: Date.now(),
+      })
+    );
+  } catch (e) {}
+}
+setInterval(sendMyLocation, 3000);
 
 // 两点球面距离（米）
 function distanceM(a, b) {
@@ -352,8 +394,8 @@ async function handleOffer(offer) {
       } catch (e) {
         return;
       }
-      if (m && m.type === "avatar") {
-        setDriverAvatar(m.data);
+      if (m && m.type === "profile") {
+        setDriverProfile(m.name, m.avatar);
       } else if (m && m.type === "loc") {
         onLocation(m);
       } else if (m && m.lat !== undefined) {
@@ -432,7 +474,10 @@ function onLocation(m) {
     driverMarker = created.marker;
     driverArrowG = created.arrowG;
     driverAvatarImg = created.avatarImg;
+    driverNameEl = created.nameEl;
     map.add(driverMarker);
+    // 若资料在位置之前到达，此处补上名字/头像
+    applyDriverProfile();
     // 连接成功后自动把地图焦点移到分享者所在区域，不用好友自己找
     map.setCenter(pos);
     applyZoom();
