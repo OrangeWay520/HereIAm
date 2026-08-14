@@ -2,34 +2,191 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>HereIAm · 点对点位置共享</title>
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
-      background: #f3f5f9; color: #1a1a2e; min-height: 100vh;
-      display: flex; align-items: center; justify-content: center; padding: 20px;
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden;
+      font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; }
+    body { background: #f3f5f9; color: #1a1a2e; }
+
+    /* ========== 地图全屏 ========== */
+    #map { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; }
+
+    /* ========== 顶部状态栏（固定，不挡地图交互） ========== */
+    .topbar {
+      position: absolute; top: 0; left: 0; right: 0; height: 56px; z-index: 10;
+      background: #4b3fe3; display: flex; align-items: center; justify-content: center;
+      pointer-events: none;
     }
-    .card { background: #fff; border-radius: 16px; padding: 24px; max-width: 360px; width: 100%; box-shadow: 0 4px 20px rgba(0,0,0,.06); }
-    h1 { font-size: 20px; color: #4b3fe3; margin-bottom: 6px; }
-    p { font-size: 13px; color: #6b7280; margin-bottom: 16px; }
-    a.btn {
-      display: block; text-align: center; padding: 14px; border-radius: 12px; font-size: 15px;
-      text-decoration: none; font-weight: 600; margin-bottom: 10px;
+    .topbar-logo { height: 36px; pointer-events: auto; }
+    .indicator {
+      position: absolute; right: 16px; top: 50%; transform: translateY(-50%);
+      width: 6px; height: 6px; border-radius: 50%; background: #b6bcc6;
+      transition: background .3s;
     }
-    .driver { background: #4b3fe3; color: #fff; }
-    .friend { background: #22c55e; color: #fff; }
-    .note { font-size: 12px; color: #9ca3af; margin-top: 8px; }
+    .indicator.on { background: #16a34a; }
+
+    /* ========== HIA 圆形按键 ========== */
+    .hia-btn {
+      position: absolute; bottom: 28px; left: 50%; transform: translateX(-50%);
+      width: 64px; height: 64px; border-radius: 50%; border: none; cursor: pointer;
+      background: #fff; box-shadow: 0 2px 10px rgba(0,0,0,.25);
+      z-index: 10; overflow: hidden; padding: 0;
+    }
+    .hia-btn img { width: 100%; height: 100%; object-fit: cover; }
+    .hia-btn:active { transform: translateX(-50%) scale(.95); }
+
+    /* ========== 遮罩 ========== */
+    .overlay {
+      position: absolute; inset: 0; background: rgba(0,0,0,.4); z-index: 20;
+      animation: fade .2s;
+    }
+    @keyframes fade { from { opacity: 0 } to { opacity: 1 } }
+
+    /* ========== 底部面板（选择 / 分享 / 查看） ========== */
+    .sheet, .panel {
+      position: absolute; bottom: 0; left: 0; right: 0; z-index: 30;
+      background: #fff; border-radius: 24px 24px 0 0; padding: 20px 20px 32px;
+      max-width: 440px; margin: 0 auto;
+      box-shadow: 0 -4px 24px rgba(0,0,0,.1);
+      animation: slideUp .25s ease;
+    }
+    @keyframes slideUp { from { transform: translateY(100%) } to { transform: translateY(0) } }
+
+    /* 选择面板 */
+    .sheet-title { font-size: 20px; font-weight: 700; color: #1a1a2e; }
+    .sheet-sub { font-size: 13px; color: #6b7280; margin: 4px 0 16px; }
+    .sheet-option {
+      display: flex; align-items: center; padding: 16px; border-radius: 16px;
+      background: #f3f5f9; margin-bottom: 12px; cursor: pointer;
+    }
+    .sheet-option:active { background: #e8eaf6; }
+    .opt-icon {
+      width: 44px; height: 44px; border-radius: 50%; display: flex;
+      align-items: center; justify-content: center; margin-right: 14px; flex-shrink: 0;
+      font-size: 22px;
+    }
+    .opt-icon.share { background: rgba(75,63,227,.12); color: #4b3fe3; }
+    .opt-icon.view { background: rgba(47,134,246,.12); color: #2f86f6; }
+    .opt-title { font-size: 16px; font-weight: 600; color: #1a1a2e; }
+    .opt-sub { font-size: 12px; color: #6b7280; margin-top: 2px; }
+
+    /* 分享 / 查看面板通用 */
+    .panel-header { display: flex; align-items: center; margin-bottom: 16px; }
+    .panel-title { font-size: 19px; font-weight: 700; flex: 1; color: #1a1a2e; }
+    .panel-close { font-size: 22px; color: #6b7280; cursor: pointer; padding: 4px 8px; }
+    .panel-label { font-size: 12px; color: #6b7280; margin-bottom: 4px; }
+
+    /* 分享面板 */
+    .share-code {
+      font-size: 36px; font-weight: 700; letter-spacing: 6px; text-align: center;
+      color: #4b3fe3; padding: 8px 0; cursor: pointer;
+    }
+    .share-hint { font-size: 11px; color: #9ca3af; text-align: center; }
+    .share-qr { text-align: center; margin: 12px 0; }
+    .share-qr img { width: 140px; height: 140px; border: 1px solid #e5e7eb; border-radius: 8px; }
+    .share-actions { display: flex; gap: 12px; margin-top: 8px; }
+
+    /* 按钮 */
+    .btn-primary {
+      width: 100%; padding: 14px; border: none; border-radius: 12px;
+      font-size: 16px; font-weight: 600; background: #4b3fe3; color: #fff; cursor: pointer;
+    }
+    .btn-primary:disabled { background: #c7c7d8; cursor: not-allowed; }
+    .btn-outline {
+      flex: 1; padding: 12px; border: 1px solid #4b3fe3; border-radius: 12px;
+      font-size: 15px; font-weight: 600; background: #fff; color: #4b3fe3; cursor: pointer;
+    }
+    .btn-stop {
+      width: 100%; padding: 12px; margin-top: 12px; border: 1px solid #f43f5e;
+      border-radius: 12px; font-size: 15px; font-weight: 600; background: #fff; color: #f43f5e; cursor: pointer;
+    }
+
+    /* 口令输入 */
+    .code-input {
+      width: 100%; padding: 14px; border: 1px solid #d1d5db; border-radius: 12px;
+      font-size: 22px; font-weight: 700; letter-spacing: 4px; text-align: center;
+      color: #1a1a2e; outline: none; margin: 8px 0 16px;
+    }
+    .code-input:focus { border-color: #4b3fe3; }
+
+    /* 状态文字 */
+    .status { margin-top: 12px; font-size: 13px; color: #6b7280; text-align: center; }
+    .status.on { color: #16a34a; font-weight: 600; }
   </style>
 </head>
 <body>
-  <div class="card">
-    <h1>HereIAm</h1>
-    <p>位置点对点直传 · 不经任何服务器</p>
-    <a class="btn driver" href="driver.html">我要分享位置</a>
-    <a class="btn friend" href="friend.html">我要查看位置</a>
-    <p class="note">位置仅在你与好友间点对点直传、不经任何服务器</p>
+  <!-- 地图 -->
+  <div id="map"></div>
+
+  <!-- 顶部状态栏 -->
+  <div class="topbar">
+    <img class="topbar-logo" src="bar_logo1.png" alt="HereIAm">
+    <div class="indicator" id="indicator"></div>
   </div>
+
+  <!-- HIA 圆形按键 -->
+  <button class="hia-btn" id="hiaBtn">
+    <img src="hereiam_logo.png" alt="HereIAm">
+  </button>
+
+  <!-- 遮罩 -->
+  <div class="overlay" id="overlay" style="display:none"></div>
+
+  <!-- 选择面板 -->
+  <div class="sheet" id="sheet" style="display:none">
+    <div class="sheet-title">你想做什么？</div>
+    <div class="sheet-sub">选择一个操作开始使用</div>
+    <div class="sheet-option" id="optShare">
+      <div class="opt-icon share">↗</div>
+      <div>
+        <div class="opt-title">分享我的位置</div>
+        <div class="opt-sub">生成口令，让好友实时查看你的位置</div>
+      </div>
+    </div>
+    <div class="sheet-option" id="optView">
+      <div class="opt-icon view">◎</div>
+      <div>
+        <div class="opt-title">查看他人位置</div>
+        <div class="opt-sub">输入口令，查看好友的实时位置</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 分享面板 -->
+  <div class="panel" id="sharePanel" style="display:none">
+    <div class="panel-header">
+      <span class="panel-title">分享我的位置</span>
+      <span class="panel-close" id="shareClose">✕</span>
+    </div>
+    <div class="panel-label">分享口令（点击可复制）</div>
+    <div class="share-code" id="code">------</div>
+    <div class="share-hint">把链接或口令发给好友</div>
+    <div class="share-qr"><img id="qrcode" alt="二维码"></div>
+    <div class="share-actions">
+      <button class="btn-outline" id="copyBtn">复制口令</button>
+      <button class="btn-outline" id="linkBtn">复制链接</button>
+    </div>
+    <div class="status" id="status"></div>
+    <button class="btn-stop" id="stopBtn" style="display:none">停止共享</button>
+  </div>
+
+  <!-- 查看面板 -->
+  <div class="panel" id="viewPanel" style="display:none">
+    <div class="panel-header">
+      <span class="panel-title">查看他人位置</span>
+      <span class="panel-close" id="viewClose">✕</span>
+    </div>
+    <div class="panel-label">请输入好友分享的口令</div>
+    <input class="code-input" id="viewCode" type="tel" maxlength="6" placeholder="6 位口令">
+    <button class="btn-primary" id="joinBtn" disabled>开始查看</button>
+    <div class="status" id="viewStatus"></div>
+  </div>
+
+  <script src="https://cdn.ably.com/lib/ably.min-1.2.41.js"></script>
+  <script src="config.js?v=20260815a"></script>
+  <script src="signaling.js?v=20260815a"></script>
+  <script src="index.js?v=20260815a"></script>
 </body>
 </html>
