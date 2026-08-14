@@ -42,10 +42,9 @@ function getUserAvatar() {
   return userProfile.avatar;
 }
 
-// 渲染左上角用户中心入口（头像 + 名字）
+// 渲染左上角用户中心入口（仅头像，与安卓 App 一致不显示用户名）
 function renderUserEntry() {
   const avatarEl = document.getElementById("userAvatar");
-  const nameEl = document.getElementById("userName");
   if (avatarEl) {
     if (userProfile.avatar) {
       avatarEl.style.backgroundImage = "url('" + userProfile.avatar + "')";
@@ -56,7 +55,6 @@ function renderUserEntry() {
       avatarEl.textContent = userProfile.name.slice(0, 1);
     }
   }
-  if (nameEl) nameEl.textContent = userProfile.name;
 }
 
 // ========== 用户中心面板 ==========

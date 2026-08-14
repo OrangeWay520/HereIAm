@@ -26,10 +26,6 @@
       font-weight: 700; font-size: 15px; border: 2px solid rgba(255,255,255,.4);
       background-size: cover; flex-shrink: 0;
     }
-    .user-name {
-      color: #fff; font-size: 12px; font-weight: 600;
-      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    }
     .status { font-size: 12px; padding: 4px 10px; border-radius: 999px; background: rgba(255,255,255,.18); }
     .status.on { background: #22c55e; }
     #map { flex: 1; min-height: 60vh; width: 100%; }
@@ -146,7 +142,6 @@
     <div style="display:flex;align-items:center;gap:10px;min-width:0">
       <div class="user-entry" id="userEntry" title="用户中心">
         <div class="user-avatar" id="userAvatar"></div>
-        <span class="user-name" id="userName"></span>
       </div>
       <span class="t">好友位置</span>
     </div>
@@ -199,9 +194,9 @@
 
   <script src="https://cdn.ably.com/lib/ably.min-1.2.41.js"></script>
   <!-- 加版本号：防止浏览器/CDN 缓存旧版 JS，更新后强制重新加载 -->
-  <script src="config.js?v=20260815i"></script>
-  <script src="signaling.js?v=20260815i"></script>
-  <script src="user.js?v=20260815i"></script>
-  <script src="friend.js?v=20260815i"></script>
+  <script src="config.js?v=20260815j"></script>
+  <script src="signaling.js?v=20260815j"></script>
+  <script src="user.js?v=20260815j"></script>
+  <script src="friend.js?v=20260815j"></script>
 </body>
 </html>
