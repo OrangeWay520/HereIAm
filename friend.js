@@ -156,7 +156,9 @@ function applyDriverProfile() {
     driverNameEl.style.display = "block";
   }
   if (driverAvatarImg && driverAvatarData) {
+    // 同时设置 href 与 xlink:href，兼容新旧浏览器
     driverAvatarImg.setAttribute("href", driverAvatarData);
+    driverAvatarImg.setAttributeNS("http://www.w3.org/1999/xlink", "xlink:href", driverAvatarData);
     driverAvatarImg.style.display = "block";
   }
 }
@@ -209,32 +211,48 @@ function updateDriverArrow(heading) {
 }
 
 // ============================================================
-//  好友自己的位置（用于计算分享者-好友距离做动态缩放）
-//  好友可拒绝定位：拒绝则退化为固定缩放
+//  好友自己的位置（用于计算分享者-好友距离做动态缩放 + 双向共享）
+//  用 watchPosition 持续监听：不仅拿到首次定位，还会随移动持续更新，
+//  并通过数据通道实时回传给分享者（分享者首页地图同步显示好友位置）。
+//  好友可拒绝定位：拒绝则退化为固定缩放、不再回传位置。
 // ============================================================
+let locationWatchId = null;
 function locateMe() {
   if (!navigator.geolocation) return;
-  navigator.geolocation.getCurrentPosition(
-    (pos) => {
-      const [lng, lat] = wgs84ToGcj02(pos.coords.longitude, pos.coords.latitude);
-      myPos = new AMap.LngLat(lng, lat);
-      if (!map) return;
-      if (!myMarker) {
-        myMarker = new AMap.Marker({
-          position: myPos,
-          content: '<div style="width:14px;height:14px;border-radius:50%;' +
-            'background:#22c55e;border:2px solid #fff;box-shadow:0 0 4px rgba(0,0,0,.3);"></div>',
-          offset: new AMap.Pixel(-7, -7),
-          zIndex: 110,
-        });
-        map.add(myMarker);
-      } else {
-        myMarker.setPosition(myPos);
-      }
-    },
-    () => {}, // 好友拒绝定位：不显示自己，退化为固定缩放
-    { enableHighAccuracy: true, maximumAge: 0, timeout: 8000 }
-  );
+  let retries = 0;
+  const startWatch = () => {
+    locationWatchId = navigator.geolocation.watchPosition(
+      (pos) => {
+        retries = 0;
+        const [lng, lat] = wgs84ToGcj02(pos.coords.longitude, pos.coords.latitude);
+        myPos = new AMap.LngLat(lng, lat);
+        if (!map) return;
+        if (!myMarker) {
+          myMarker = new AMap.Marker({
+            position: myPos,
+            content: '<div style="width:14px;height:14px;border-radius:50%;' +
+              'background:#22c55e;border:2px solid #fff;box-shadow:0 0 4px rgba(0,0,0,.3);"></div>',
+            offset: new AMap.Pixel(-7, -7),
+            zIndex: 110,
+          });
+          map.add(myMarker);
+        } else {
+          myMarker.setPosition(myPos);
+        }
+      },
+      () => {
+        // 定位失败（权限未授予 / 瞬时失败）：稍后重试，最多 5 次
+        retries++;
+        if (retries <= 5) {
+          if (locationWatchId != null) navigator.geolocation.clearWatch(locationWatchId);
+          locationWatchId = null;
+          setTimeout(startWatch, 3000);
+        }
+      },
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 8000 }
+    );
+  };
+  startWatch();
 }
 
 // 双向共享：把自己的位置（GCJ-02）定期通过数据通道回传给分享者，

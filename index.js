@@ -11,6 +11,7 @@ let map = null;
 let mode = "idle";              // "idle" | "share" | "view"
 let pc = null, dc = null, signaling = null;
 let shareCode = null;           // 分享口令
+let viewCode = null;            // 正在查看的口令（查看模式）
 let joinTimer = null;           // 查看者重发 join 定时器
 
 // 自己的位置（进入页面即自动定位，同 App 端）
@@ -20,6 +21,8 @@ let myMarker = null, myArrowG = null, myHasCentered = false;
 
 // 查看模式：好友定位标
 let driverMarker = null, driverArrowG = null;
+let driverAvatarImg = null, driverNameEl = null;
+let driverAvatarData = null, driverName = null; // 分享者资料暂存（marker 未创建前）
 let hasCentered = false;
 
 // 本好友会话唯一 ID（查看模式用）
@@ -74,13 +77,31 @@ function hideAllPanels() {
 }
 
 function onHiaClick() {
-  // 已有面板打开 → 关闭；否则弹出选择面板
+  // 已有面板打开 → 关闭；否则按当前模式直接弹出对应窗口
   const anyOpen = $("sheet").style.display !== "none" ||
                   $("sharePanel").style.display !== "none" ||
                   $("viewPanel").style.display !== "none";
   if (anyOpen) { hideAllPanels(); return; }
   showOverlay();
+  if (mode === "share") {
+    // 正在共享 → 直接弹出「分享我的位置」窗口
+    $("sharePanel").style.display = "block";
+    return;
+  }
+  if (mode === "view") {
+    // 正在查看他人 → 直接弹出「查看他人位置」窗口（显示正在查看状态）
+    showViewPanel(true);
+    return;
+  }
+  // 空闲 → 弹出选择面板
   $("sheet").style.display = "block";
+}
+
+// 查看面板双态：true=正在查看（口令+停止），false=输入口令
+function showViewPanel(isViewing) {
+  $("inputSection").style.display = isViewing ? "none" : "block";
+  $("viewingSection").style.display = isViewing ? "block" : "none";
+  if (isViewing && viewCode) $("viewingCode").textContent = viewCode;
 }
 
 function startShare() {
@@ -94,6 +115,7 @@ function startShare() {
 
 function startView() {
   $("sheet").style.display = "none";
+  showViewPanel(false);
   $("viewPanel").style.display = "block";
 }
 
@@ -203,9 +225,19 @@ function startMyLocation() {
         };
         // 地图上更新自己的水滴定位标
         updateMyMarker();
-        // 若正在分享且通道打开 → 实时上报好友
-        if (mode === "share" && dc && dc.readyState === "open") {
-          dc.send(JSON.stringify(myPos));
+        // 双向共享：数据通道打开时把自己的位置实时回传对方
+        if (dc && dc.readyState === "open") {
+          if (mode === "share") {
+            // 分享模式：发送 WGS-84，好友端(friend.js)统一转 GCJ-02
+            dc.send(JSON.stringify(myPos));
+          } else if (mode === "view") {
+            // 查看模式：分享者是安卓 App，其直接按 GCJ-02 显示，需先转换
+            const [lng, lat] = wgs84ToGcj02(myPos.lng, myPos.lat);
+            dc.send(JSON.stringify({
+              type: "loc", lat, lng,
+              heading: myPos.heading, acc: myPos.acc, t: Date.now(),
+            }));
+          }
         }
       },
       (err) => {
@@ -282,6 +314,7 @@ async function joinView() {
   const code = $("viewCode").value.trim();
   if (code.length !== 6) return;
   mode = "view";
+  viewCode = code;
   hideOverlay();
   $("viewPanel").style.display = "none";
   setViewStatus("正在连接…", false);
@@ -294,6 +327,28 @@ async function joinView() {
   } catch (e) {
     setViewStatus("信令连接失败，请检查网络", false);
   }
+}
+
+// 停止查看：断开连接、移除好友定位标、回到空闲
+function stopView() {
+  mode = "idle";
+  viewCode = null;
+  if (joinTimer) { clearInterval(joinTimer); joinTimer = null; }
+  if (pc) { try { pc.close(); } catch (e) {} pc = null; dc = null; }
+  if (signaling) { try { signaling.close(); } catch (e) {} signaling = null; }
+  if (driverMarker) {
+    try { driverMarker.setMap(null); } catch (e) {}
+    driverMarker = null;
+    driverArrowG = null;
+    driverAvatarImg = null;
+    driverNameEl = null;
+  }
+  driverAvatarData = null;
+  driverName = null;
+  hasCentered = false;
+  setViewStatus("已停止查看", false);
+  $("viewPanel").style.display = "none";
+  hideOverlay();
 }
 
 function startJoinTimer() {
@@ -313,6 +368,8 @@ async function onSignalView(msg) {
     if (pc) { try { await pc.addIceCandidate(msg.candidate); } catch (e) {} }
   } else if (msg.type === "bye") {
     setViewStatus("对方已结束共享，可关闭", false);
+    mode = "idle";
+    viewCode = null;
     if (joinTimer) { clearInterval(joinTimer); joinTimer = null; }
     if (pc) { try { pc.close(); } catch (e) {} pc = null; dc = null; }
   }
@@ -330,7 +387,11 @@ async function handleOffer(offer) {
     dc.onmessage = (ev) => {
       let m;
       try { m = JSON.parse(ev.data); } catch (e) { return; }
-      if (m && m.lat !== undefined) onLocation(m);
+      if (m && m.type === "profile") {
+        setDriverProfile(m.name, m.avatar);
+      } else if (m && m.lat !== undefined) {
+        onLocation(m);
+      }
     };
   };
   pc.onconnectionstatechange = () => {
@@ -357,7 +418,11 @@ function onLocation(m) {
     const created = createDriverMarker(pos, m.heading);
     driverMarker = created.marker;
     driverArrowG = created.arrowG;
+    driverAvatarImg = created.avatarImg;
+    driverNameEl = created.nameEl;
     map.add(driverMarker);
+    // 若资料在位置之前到达，此处补上名字/头像
+    applyDriverProfile();
     if (!hasCentered) { hasCentered = true; map.setCenter(pos); }
   } else {
     driverMarker.setPosition(pos);
@@ -381,13 +446,53 @@ function createDriverMarker(pos, heading) {
     '<path d="' + buildPointerPathD() + '" fill="rgba(47,134,246,0.96)"/>' +
     "</g>" +
     '<circle cx="' + M_CX + '" cy="' + M_CY + '" r="' + M_R.toFixed(2) + '" fill="rgba(47,134,246,0.96)"/>' +
+    // 分享者头像（覆盖在圆盘上，圆形裁剪）
+    '<clipPath id="avatarClip"><circle cx="' + M_CX + '" cy="' + M_CY + '" r="' + M_AVATAR_R.toFixed(2) + '"/></clipPath>' +
+    '<image id="avatarImg" x="' + (M_CX - M_AVATAR_R).toFixed(2) + '" y="' + (M_CY - M_AVATAR_R).toFixed(2) +
+    '" width="' + (M_AVATAR_R * 2).toFixed(2) + '" height="' + (M_AVATAR_R * 2).toFixed(2) +
+    '" clip-path="url(#avatarClip)" style="display:none;pointer-events:none;"/>' +
     '<circle cx="' + M_CX + '" cy="' + M_CY + '" r="' + M_R.toFixed(2) + '" fill="none" stroke="#ffffff" stroke-width="' + M_WHITE_BORDER.toFixed(2) + '"/>' +
     "</svg>";
+  // 分享者名字气泡（显示在地标上方）
+  const nameEl = document.createElement("div");
+  nameEl.id = "driverName";
+  nameEl.style.cssText =
+    "position:absolute;top:-16px;left:50%;transform:translateX(-50%);" +
+    "max-width:140px;padding:2px 8px;border-radius:10px;background:rgba(26,26,46,0.75);" +
+    "color:#fff;font-size:11px;line-height:16px;white-space:nowrap;overflow:hidden;" +
+    "text-overflow:ellipsis;display:none;pointer-events:none;";
+  content.appendChild(nameEl);
   const marker = new AMap.Marker({
     position: pos, content: content,
     offset: new AMap.Pixel(-M_CX, -M_CY), zIndex: 120,
   });
-  return { marker, arrowG: content.querySelector("#arrowG") };
+  return {
+    marker,
+    arrowG: content.querySelector("#arrowG"),
+    avatarImg: content.querySelector("#avatarImg"),
+    nameEl: nameEl,
+  };
+}
+
+// 应用分享者资料（用户名 + 头像）到定位标
+function applyDriverProfile() {
+  if (driverNameEl && driverName) {
+    driverNameEl.textContent = driverName;
+    driverNameEl.style.display = "block";
+  }
+  if (driverAvatarImg && driverAvatarData) {
+    // 同时设置 href 与 xlink:href，兼容新旧浏览器
+    driverAvatarImg.setAttribute("href", driverAvatarData);
+    driverAvatarImg.setAttributeNS("http://www.w3.org/1999/xlink", "xlink:href", driverAvatarData);
+    driverAvatarImg.style.display = "block";
+  }
+}
+
+// 显示分享者资料（数据通道推送的 profile 消息）
+function setDriverProfile(name, dataUrl) {
+  if (name) driverName = name;
+  if (dataUrl) driverAvatarData = dataUrl;
+  applyDriverProfile();
 }
 
 function buildWaterdropPathD(r) {
@@ -501,6 +606,7 @@ function bindEvents() {
 
   // 查看面板
   $("viewClose").addEventListener("click", () => { $("viewPanel").style.display = "none"; hideOverlay(); });
+  $("stopViewBtn").addEventListener("click", stopView);
   $("viewCode").addEventListener("input", (e) => {
     $("joinBtn").disabled = e.target.value.trim().length !== 6;
   });

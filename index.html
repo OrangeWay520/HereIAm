@@ -200,15 +200,25 @@
       <span class="panel-title">查看他人位置</span>
       <span class="panel-close" id="viewClose">✕</span>
     </div>
-    <div class="panel-label">请输入好友分享的口令</div>
-    <input class="code-input" id="viewCode" type="tel" maxlength="6" placeholder="6 位口令">
-    <button class="btn-primary" id="joinBtn" disabled>开始查看</button>
-    <div class="status" id="viewStatus"></div>
+    <!-- 正在查看：显示口令 + 停止 -->
+    <div id="viewingSection" style="display:none">
+      <div class="panel-label">正在查看口令</div>
+      <div class="share-code" id="viewingCode">------</div>
+      <div class="status" id="viewingStatus"></div>
+      <button class="btn-stop" id="stopViewBtn">停止查看</button>
+    </div>
+    <!-- 输入口令 -->
+    <div id="inputSection">
+      <div class="panel-label">请输入好友分享的口令</div>
+      <input class="code-input" id="viewCode" type="tel" maxlength="6" placeholder="6 位口令">
+      <button class="btn-primary" id="joinBtn" disabled>开始查看</button>
+      <div class="status" id="viewStatus"></div>
+    </div>
   </div>
 
   <script src="https://cdn.ably.com/lib/ably.min-1.2.41.js"></script>
-  <script src="config.js?v=20260815c"></script>
-  <script src="signaling.js?v=20260815c"></script>
-  <script src="index.js?v=20260815c"></script>
+  <script src="config.js?v=20260815e"></script>
+  <script src="signaling.js?v=20260815e"></script>
+  <script src="index.js?v=20260815e"></script>
 </body>
 </html>
