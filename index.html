@@ -4,6 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>HereIAm · 点对点位置共享</title>
+  <!-- 网页图标：与安卓 App 一致的图标（专用小尺寸文件 + 版本号强制刷新缓存） -->
+  <link rel="icon" type="image/png" href="favicon.png?v=20260815q">
+  <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=20260815q">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; overflow: hidden;
@@ -58,6 +61,34 @@
     }
     .locate-btn:active { transform: scale(.95); }
     .locate-btn svg { width: 20px; height: 20px; }
+
+    /* ========== 顶部用户选择器（同安卓 App） ========== */
+    .user-selector {
+      position: absolute; top: 64px; left: 50%; transform: translateX(-50%);
+      display: flex; align-items: center; gap: 6px; height: 36px;
+      background: rgba(255,255,255,.92); border-radius: 16px;
+      padding: 3px 10px 3px 4px; box-shadow: 0 2px 8px rgba(0,0,0,.15);
+      cursor: pointer; z-index: 15;
+    }
+    .us-avatar {
+      width: 28px; height: 28px; border-radius: 50%; background: #f3f5f9;
+      color: #6b7280; display: flex; align-items: center; justify-content: center;
+      font-size: 13px; font-weight: 700; background-size: cover; flex-shrink: 0; overflow: hidden;
+    }
+    .us-name { font-size: 13px; font-weight: 600; color: #1a1a2e; max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .user-selector svg { width: 18px; height: 18px; fill: #6b7280; flex-shrink: 0; }
+    .us-menu {
+      position: absolute; top: 104px; left: 50%; transform: translateX(-50%);
+      min-width: 170px; background: #fff; border-radius: 16px;
+      box-shadow: 0 4px 16px rgba(0,0,0,.18); z-index: 16; overflow: hidden; display: none;
+    }
+    .us-item {
+      display: flex; align-items: center; gap: 6px; padding: 10px 14px; cursor: pointer;
+    }
+    .us-item:hover { background: #f3f5f9; }
+    .us-item .us-av { width: 28px; height: 28px; border-radius: 50%; background: #f3f5f9; color: #6b7280; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; background-size: cover; flex-shrink: 0; overflow: hidden; }
+    .us-item .us-txt { flex: 1; text-align: center; font-size: 14px; color: #1a1a2e; }
+    .us-item .us-check { width: 28px; text-align: center; color: #4b3fe3; font-weight: 700; }
 
     /* ========== 遮罩 ========== */
     .overlay {
@@ -223,6 +254,30 @@
     </svg>
   </button>
 
+  <!-- 顶部用户选择器（同安卓 App）：选择「我」/「对端好友」使其位置保持居中 -->
+  <div class="user-selector" id="userSelector" title="选择要居中跟随的人">
+    <div class="us-avatar" id="usAvatar"></div>
+    <div class="us-name" id="usName">我</div>
+    <svg viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z"/></svg>
+  </div>
+  <div class="us-menu" id="usMenu">
+    <div class="us-item" id="usItemMe">
+      <div class="us-av" id="usAvMe"></div>
+      <div class="us-txt" id="usTxtMe">我</div>
+      <div class="us-check" id="usCheckMe"></div>
+    </div>
+    <div class="us-item" id="usItemFriend" style="display:none">
+      <div class="us-av" id="usAvFriend"></div>
+      <div class="us-txt" id="usTxtFriend">好友</div>
+      <div class="us-check" id="usCheckFriend"></div>
+    </div>
+    <div class="us-item" id="usItemStop" style="display:none">
+      <div class="us-av" style="background:#fef2f2;color:#ef4444">✕</div>
+      <div class="us-txt" style="color:#ef4444">停止查看</div>
+      <div class="us-check"></div>
+    </div>
+  </div>
+
   <!-- 遮罩 -->
   <div class="overlay" id="overlay" style="display:none"></div>
 
@@ -325,9 +380,9 @@
   </div>
 
   <script src="https://cdn.ably.com/lib/ably.min-1.2.41.js"></script>
-  <script src="config.js?v=20260815j"></script>
-  <script src="signaling.js?v=20260815j"></script>
-  <script src="user.js?v=20260815j"></script>
-  <script src="index.js?v=20260815j"></script>
+  <script src="config.js?v=20260815q"></script>
+  <script src="signaling.js?v=20260815q"></script>
+  <script src="user.js?v=20260815q"></script>
+  <script src="index.js?v=20260815q"></script>
 </body>
 </html>

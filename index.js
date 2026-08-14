@@ -31,11 +31,21 @@ let hasCentered = false;
 // 本好友会话唯一 ID（查看模式用）
 const friendId = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 
+// ========== 顶部用户选择器 / 定位按钮状态（同安卓 App） ==========
+// 当前跟随目标："me"=自己位置居中 / "friend"=对端好友位置居中 / null=不跟随
+let followTarget = "me";
+// 定位按钮状态：0=聚焦目标（居中放大）, 1=总览全部（缩小显示所有人）, 2=复位朝北（bearing/tilt 归零）；点击循环切换
+let locStep = 0;
+// 总览模式：定位键切到「总览全部」时置 true，暂停自动跟随；不改变用户选择框的选中项
+let overviewMode = false;
+// 自动跟随去重：仅在位置真正变化时居中，避免指南针 80ms 刷新把地图反复拉回
+let lastFollowCenter = null;
+
 // ========== 水滴定位标常量（与 friend.js 一致，M_SCALE=8/15）==========
 const M_SCALE = 8 / 15;
 const M_R = 22 * M_SCALE;
 const M_WHITE_BORDER = 3.5 * M_SCALE;
-const M_AVATAR_R = M_R - 1.2;
+const M_AVATAR_R = M_R;                   // 头像半径 = 圆盘半径（头像外围白色轮廓与水滴外轮廓同宽）
 const M_R_WHITE = M_R + M_WHITE_BORDER;
 const M_CX = 48 * M_SCALE;
 const M_CY = 72 * M_SCALE;
@@ -114,6 +124,7 @@ function startShare() {
     shareCode = genCode();
     initShare(shareCode);
   }
+  updateUserSelector();
 }
 
 function startView() {
@@ -135,6 +146,11 @@ function stopShare() {
   $("stopBtn").style.display = "none";
   $("code").textContent = "------";
   $("qrcode").src = "";
+  // 停止共享后收起分享面板
+  hideAllPanels();
+  // 移除对端（查看者）定位标并跳回自己（同安卓端 clearAllFriends 行为）
+  removeDriverMarker();
+  revertToMe();
 }
 
 // ============================================================
@@ -179,6 +195,16 @@ function createConnection() {
     // 连接建立后把自己的资料（用户名+头像）推送给好友端
     sendMyProfile();
     startLocationStream();
+  };
+  // 双向共享：接收查看者（安卓 App）回传的位置/资料，在地图上显示（对称协议：收到 WGS-84，转 GCJ-02 显示）
+  dc.onmessage = (ev) => {
+    let m;
+    try { m = JSON.parse(ev.data); } catch (e) { return; }
+    if (m && m.type === "profile") {
+      setDriverProfile(m.name, m.avatar);
+    } else if (m && m.lat !== undefined) {
+      onLocation(m);
+    }
   };
 
   pc.onicecandidate = (e) => {
@@ -248,10 +274,10 @@ function startMyLocation() {
             // 分享模式：发送 WGS-84，好友端(friend.js)统一转 GCJ-02
             dc.send(JSON.stringify(myPos));
           } else if (mode === "view") {
-            // 查看模式：分享者是安卓 App，其直接按 GCJ-02 显示，需先转换
-            const [lng, lat] = wgs84ToGcj02(myPos.lng, myPos.lat);
+            // 查看模式：对称协议，发送 WGS-84，安卓端统一转 GCJ-02 后显示
             dc.send(JSON.stringify({
-              type: "loc", lat, lng,
+              type: "loc",
+              lat: myPos.lat, lng: myPos.lng,
               heading: myPos.heading, acc: myPos.acc, t: Date.now(),
             }));
           }
@@ -288,31 +314,84 @@ function updateMyMarker() {
     myMarker.setPosition(pos);
     updateArrowG(myArrowG, myPos.heading);
   }
+  // 跟随自己：位置真正变化时自动居中（保留当前缩放，总览模式下暂停，同安卓 App）
+  if (followTarget === "me" && !overviewMode) {
+    if (!lastFollowCenter ||
+        Math.abs(pos.lng - lastFollowCenter.lng) > 1e-7 ||
+        Math.abs(pos.lat - lastFollowCenter.lat) > 1e-7) {
+      lastFollowCenter = { lng: pos.lng, lat: pos.lat };
+      map.setCenter(pos);
+    }
+  }
 }
 
-// 定位按钮：回到自己位置
-function goToMyLocation() {
+// ============================================================
+//  定位按钮（右下角）：点击循环切换「聚焦目标」/「总览全部」/「复位朝北」（同安卓 App）
+//  注意：聚焦/总览不改变用户选择框的选中项（followTarget 仅由选择器修改）
+// ============================================================
+function onLocateClick() {
   if (!map) return;
-  if (myPos) {
-    const [lng, lat] = wgs84ToGcj02(myPos.lng, myPos.lat);
-    map.setZoomAndCenter(16, new AMap.LngLat(lng, lat));
-  } else {
-    // 尚未定位成功，重新请求一次
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        myPos = {
-          lat: pos.coords.latitude,
-          lng: pos.coords.longitude,
-          heading: pos.coords.heading != null ? Math.round(pos.coords.heading) : null,
-          t: Date.now(),
-        };
-        updateMyMarker();
+  locStep = (locStep + 1) % 3;
+  switch (locStep) {
+    case 0: {
+      // 聚焦：将选中的人居中放大
+      overviewMode = false;
+      let target = null;
+      if (followTarget === "friend" && driverMarker) {
+        target = driverMarker.getPosition();
+      } else if (myPos) {
         const [lng, lat] = wgs84ToGcj02(myPos.lng, myPos.lat);
-        map.setZoomAndCenter(16, new AMap.LngLat(lng, lat));
-      },
-      () => { setIndicator(false); },
-      { enableHighAccuracy: true, maximumAge: 0, timeout: 8000 }
-    );
+        target = new AMap.LngLat(lng, lat);
+      }
+      if (target) map.setZoomAndCenter(16, target);
+      break;
+    }
+    case 1: {
+      // 总览：缩小显示全部（不改变 followTarget，让用户选择框保持选中状态）
+      overviewMode = true;
+      fitAllPositions();
+      break;
+    }
+    default: {
+      // 复位朝北：地图恢复朝正北（rotation=0、tilt=0），保持当前中心和缩放
+      overviewMode = false;
+      resetMapNorth();
+      break;
+    }
+  }
+}
+
+// 总览：把所有位置点纳入视野（自己 + 对端好友）
+function fitAllPositions() {
+  if (!map) return;
+  const mks = [];
+  if (myMarker) mks.push(myMarker);
+  if (driverMarker) mks.push(driverMarker);
+  if (mks.length === 0) return;
+  if (mks.length === 1) {
+    map.setZoomAndCenter(14, mks[0].getPosition());
+    return;
+  }
+  if (typeof map.setFitView === "function") {
+    map.setFitView(mks, false, [90, 90, 140, 90]);
+  } else {
+    // 高德 1.4 降级：用包含所有点的包围盒
+    const b = new AMap.Bounds(mks[0].getPosition(), mks[0].getPosition());
+    mks.forEach((mk) => b.extend(mk.getPosition()));
+    map.setBounds(b);
+  }
+}
+
+// 复位朝北：rotation/tilt 归零（v2.0 用 setCameraPosition；v1.4 用 setRotation/setTilt）
+function resetMapNorth() {
+  if (!map) return;
+  if (typeof map.setCameraPosition === "function") {
+    const cam = map.getCameraPosition();
+    map.setCameraPosition({ target: cam.target, zoom: cam.zoom, tilt: 0, rotation: 0 });
+  } else {
+    if (map.setRotation) map.setRotation(0);
+    if (map.setTilt) map.setTilt(0);
+    map.setZoomAndCenter(map.getZoom(), map.getCenter());
   }
 }
 
@@ -341,6 +420,7 @@ async function joinView() {
     setViewStatus("等待好友分享…", false);
     signaling.send({ type: "join", id: friendId });
     startJoinTimer();
+    updateUserSelector();   // 进入查看模式 → 显示「停止查看」项
   } catch (e) {
     setViewStatus("信令连接失败，请检查网络", false);
   }
@@ -358,6 +438,8 @@ function stopView() {
   setViewStatus("已停止查看", false);
   $("viewPanel").style.display = "none";
   hideOverlay();
+  // 停止查看 → 自动跳回自己并刷新选择器（同安卓 App）
+  revertToMe();
 }
 
 function startJoinTimer() {
@@ -383,6 +465,8 @@ async function onSignalView(msg) {
     if (joinTimer) { clearInterval(joinTimer); joinTimer = null; }
     if (pc) { try { pc.close(); } catch (e) {} pc = null; dc = null; }
     removeDriverMarker();
+    // 对方结束共享 → 自动跳回自己并刷新选择器
+    revertToMe();
   }
 }
 
@@ -441,13 +525,17 @@ async function handleOffer(offer) {
   signaling.send({ type: "answer", sdp: answer, id: friendId });
 }
 
-// 收到分享者位置 → 在地图上显示水滴标记
+// 收到分享者位置（WGS-84）→ 转 GCJ-02 后在地图上显示水滴标记
 function onLocation(m) {
-  if (!map) return;
   const [lng, lat] = wgs84ToGcj02(m.lng, m.lat);
-  const pos = new AMap.LngLat(lng, lat);
+  showDriverAt(new AMap.LngLat(lng, lat), m.heading);
+}
+
+// 在地图上放置/更新对方定位标（对方 = 被查看的分享者 或 查看者）
+function showDriverAt(pos, heading) {
+  if (!map) return;
   if (!driverMarker) {
-    const created = createDriverMarker(pos, m.heading);
+    const created = createDriverMarker(pos, heading);
     driverMarker = created.marker;
     driverArrowG = created.arrowG;
     driverAvatarImg = created.avatarImg;
@@ -458,8 +546,19 @@ function onLocation(m) {
     if (!hasCentered) { hasCentered = true; map.setCenter(pos); }
   } else {
     driverMarker.setPosition(pos);
-    updateArrowG(driverArrowG, m.heading);
+    updateArrowG(driverArrowG, heading);
   }
+  // 跟随好友：位置更新自动居中（保留当前缩放，总览模式下暂停，同安卓 App）
+  if (followTarget === "friend" && !overviewMode) {
+    if (!lastFollowCenter ||
+        Math.abs(pos.lng - lastFollowCenter.lng) > 1e-7 ||
+        Math.abs(pos.lat - lastFollowCenter.lat) > 1e-7) {
+      lastFollowCenter = { lng: pos.lng, lat: pos.lat };
+      map.setCenter(pos);
+    }
+  }
+  // 对端定位标出现/更新时刷新用户选择器（好友项名字/头像/勾选态）
+  updateUserSelector();
 }
 
 // ============================================================
@@ -483,7 +582,8 @@ function createDriverMarker(pos, heading) {
     '<image id="avatarImg" x="' + (M_CX - M_AVATAR_R).toFixed(2) + '" y="' + (M_CY - M_AVATAR_R).toFixed(2) +
     '" width="' + (M_AVATAR_R * 2).toFixed(2) + '" height="' + (M_AVATAR_R * 2).toFixed(2) +
     '" clip-path="url(#avatarClip)" style="display:none;pointer-events:none;"/>' +
-    '<circle cx="' + M_CX + '" cy="' + M_CY + '" r="' + M_R.toFixed(2) + '" fill="none" stroke="#ffffff" stroke-width="' + M_WHITE_BORDER.toFixed(2) + '"/>' +
+    // 5. 初始圆的白色轮廓（白色圆周线，分隔圆盘与指针；有头像时隐藏，白边由头像外圈提供）
+    '<circle id="avatarStroke" cx="' + M_CX + '" cy="' + M_CY + '" r="' + M_R.toFixed(2) + '" fill="none" stroke="#ffffff" stroke-width="' + M_WHITE_BORDER.toFixed(2) + '"/>' +
     "</svg>";
   // 分享者名字气泡（显示在地标上方）
   const nameEl = document.createElement("div");
@@ -517,6 +617,7 @@ function applyDriverProfile() {
     driverAvatarImg.setAttribute("href", driverAvatarData);
     driverAvatarImg.setAttributeNS("http://www.w3.org/1999/xlink", "xlink:href", driverAvatarData);
     driverAvatarImg.style.display = "block";
+    // 头像外圈白色圆周线保持显示（与水滴外轮廓同宽），与经典模式大小一致
   }
 }
 
@@ -525,6 +626,107 @@ function setDriverProfile(name, dataUrl) {
   if (name) driverName = name;
   if (dataUrl) driverAvatarData = dataUrl;
   applyDriverProfile();
+  updateUserSelector();   // 资料到达后刷新用户选择器里好友项的名字/头像
+}
+
+// ============================================================
+//  顶部用户选择器（同安卓 App）：选择「我」/「对端好友」使其位置保持居中
+// ============================================================
+function initUserSelector() {
+  const selector = $("userSelector");
+  const menu = $("usMenu");
+  if (!selector || !menu) return;
+  selector.addEventListener("click", (e) => {
+    e.stopPropagation();
+    menu.style.display = menu.style.display === "block" ? "none" : "block";
+  });
+  document.addEventListener("click", () => { menu.style.display = "none"; });
+
+  // 我
+  $("usItemMe").addEventListener("click", (e) => {
+    e.stopPropagation();
+    followTarget = followTarget === "me" ? null : "me";
+    overviewMode = false;
+    if (followTarget === "me" && myPos) {
+      const [lng, lat] = wgs84ToGcj02(myPos.lng, myPos.lat);
+      map.setZoomAndCenter(16, new AMap.LngLat(lng, lat));
+    }
+    updateUserSelector();
+    menu.style.display = "none";
+  });
+
+  // 对端好友（地图上显示的分享者/查看者）
+  $("usItemFriend").addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (!driverMarker) return;
+    followTarget = followTarget === "friend" ? null : "friend";
+    overviewMode = false;
+    if (followTarget === "friend") {
+      map.setZoomAndCenter(16, driverMarker.getPosition());
+    }
+    updateUserSelector();
+    menu.style.display = "none";
+  });
+
+  // 停止查看
+  $("usItemStop").addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (mode !== "view") return;
+    stopView();
+    menu.style.display = "none";
+  });
+}
+
+// 刷新用户选择器：显示框（名字/头像）、勾选态、菜单项可见性
+function updateUserSelector() {
+  const selector = $("userSelector");
+  const menu = $("usMenu");
+  if (!selector || !menu) return;
+  // 显示框：头像 + 名字
+  if (followTarget === "friend" && driverMarker) {
+    $("usName").textContent = driverName || "好友";
+    renderCircleAvatar($("usAvatar"), driverAvatarData, (driverName || "好").slice(0, 1));
+  } else {
+    $("usName").textContent = "我";
+    renderCircleAvatar($("usAvatar"), userProfile.avatar, userProfile.name.slice(0, 1));
+  }
+  // 勾选状态
+  $("usCheckMe").textContent = followTarget === "me" ? "✓" : "";
+  $("usCheckFriend").textContent = followTarget === "friend" && driverMarker ? "✓" : "";
+  // 菜单项可见性：有对端定位标才显示「好友」；查看模式才显示「停止查看」
+  $("usItemFriend").style.display = driverMarker ? "flex" : "none";
+  $("usItemStop").style.display = mode === "view" ? "flex" : "none";
+  // 菜单项里的头像/名字
+  renderCircleAvatar($("usAvMe"), userProfile.avatar, userProfile.name.slice(0, 1));
+  $("usTxtMe").textContent = "我";
+  renderCircleAvatar($("usAvFriend"), driverAvatarData, (driverName || "好").slice(0, 1));
+  $("usTxtFriend").textContent = driverName || "好友";
+}
+
+// 圆形头像：有头像用背景图，无头像显示首字符
+function renderCircleAvatar(el, dataUrl, fallbackChar) {
+  if (!el) return;
+  if (dataUrl) {
+    el.style.backgroundImage = "url('" + dataUrl + "')";
+    el.style.backgroundSize = "cover";
+    el.style.backgroundPosition = "center";
+    el.textContent = "";
+  } else {
+    el.style.backgroundImage = "";
+    el.textContent = fallbackChar || "?";
+  }
+}
+
+// 对端退出 / 停止查看：自动跳回「我」并居中（同安卓 App 的 revertToMe）
+function revertToMe() {
+  followTarget = "me";
+  overviewMode = false;
+  lastFollowCenter = null;
+  if (myPos) {
+    const [lng, lat] = wgs84ToGcj02(myPos.lng, myPos.lat);
+    map.setCenter(new AMap.LngLat(lng, lat));
+  }
+  updateUserSelector();
 }
 
 function buildWaterdropPathD(r) {
@@ -679,15 +881,15 @@ function sendMyProfile() {
 // 用户中心修改资料后：重发 profile
 onUserProfileChanged = sendMyProfile;
 
-// 立即把当前自己的位置回传给对端（分享模式发 WGS-84，查看模式发 GCJ-02）
+// 立即把当前自己的位置回传给对端（对称协议：一律发 WGS-84，接收端统一转 GCJ-02）
 function sendMyLocationNow() {
   if (!dc || dc.readyState !== "open" || !myPos) return;
   if (mode === "share") {
     dc.send(JSON.stringify(myPos));
   } else if (mode === "view") {
-    const [lng, lat] = wgs84ToGcj02(myPos.lng, myPos.lat);
     dc.send(JSON.stringify({
-      type: "loc", lat, lng,
+      type: "loc",
+      lat: myPos.lat, lng: myPos.lng,
       heading: myPos.heading, acc: myPos.acc, t: Date.now(),
     }));
   }
@@ -711,7 +913,7 @@ function copyText(text) {
 function bindEvents() {
   $("hiaBtn").addEventListener("click", onHiaClick);
   $("overlay").addEventListener("click", hideAllPanels);
-  $("locateBtn").addEventListener("click", goToMyLocation);
+  $("locateBtn").addEventListener("click", onLocateClick);
 
   $("optShare").addEventListener("click", startShare);
   $("optView").addEventListener("click", startView);
@@ -745,4 +947,6 @@ bindEvents();
 startMyLocation();   // 进入页面即自动定位，显示自己的定位标
 renderUserEntry();   // 用户中心：左上角入口 + 改名/改头像
 bindUserCenterEvents();
+initUserSelector();  // 顶部用户选择器（同安卓 App）
+updateUserSelector();// 初始默认选中「我」
 initCompass();       // 指南针：静止时方向指针也转动

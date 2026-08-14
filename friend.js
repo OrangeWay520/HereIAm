@@ -99,7 +99,7 @@ function initMap() {
 const M_SCALE = 8 / 15;                   // 整体缩放因子（= 2/3 × 80%，缩小到上一版 80%）
 const M_R = 22 * M_SCALE;                 // 圆半径 ≈ 7.33
 const M_WHITE_BORDER = 3.5 * M_SCALE;     // 白边宽 ≈ 1.17
-const M_AVATAR_R = M_R - 1.2;             // 头像半径（圆内留白）
+const M_AVATAR_R = M_R;                   // 头像半径 = 圆盘半径（头像外围白色轮廓与水滴外轮廓同宽）
 const M_R_WHITE = M_R + M_WHITE_BORDER;   // ≈ 8.5
 const M_CX = 48 * M_SCALE;                // SVG 圆心 X = 16
 const M_CY = 72 * M_SCALE;                // SVG 圆心 Y = 24（偏下给指针留空间）
@@ -130,8 +130,8 @@ function createDriverMarker(pos, heading) {
     '<image id="avatarImg" x="' + (M_CX - M_AVATAR_R).toFixed(2) + '" y="' + (M_CY - M_AVATAR_R).toFixed(2) +
     '" width="' + (M_AVATAR_R * 2).toFixed(2) + '" height="' + (M_AVATAR_R * 2).toFixed(2) +
     '" clip-path="url(#avatarClip)" style="display:none;pointer-events:none;"/>' +
-    // 5. 初始圆的白色轮廓（白色圆周线，分隔圆盘与指针）
-    '<circle cx="' + M_CX + '" cy="' + M_CY + '" r="' + M_R.toFixed(2) + '" fill="none" stroke="#ffffff" stroke-width="' + M_WHITE_BORDER.toFixed(2) + '"/>' +
+    // 5. 初始圆的白色轮廓（白色圆周线，分隔圆盘与指针；有头像时隐藏，白边由头像外圈提供）
+    '<circle id="avatarStroke" cx="' + M_CX + '" cy="' + M_CY + '" r="' + M_R.toFixed(2) + '" fill="none" stroke="#ffffff" stroke-width="' + M_WHITE_BORDER.toFixed(2) + '"/>' +
     "</svg>";
 
   const marker = new AMap.Marker({
@@ -166,6 +166,7 @@ function applyDriverProfile() {
     driverAvatarImg.setAttribute("href", driverAvatarData);
     driverAvatarImg.setAttributeNS("http://www.w3.org/1999/xlink", "xlink:href", driverAvatarData);
     driverAvatarImg.style.display = "block";
+    // 头像外圈白色圆周线保持显示（与水滴外轮廓同宽），与经典模式大小一致
   }
 }
 
@@ -303,6 +304,7 @@ function updateMyArrow(heading) {
 //  好友可拒绝定位：拒绝则退化为固定缩放、不再回传位置。
 // ============================================================
 let locationWatchId = null;
+let myPosWgs = null; // 自己坐标（WGS-84 原始值，对称协议：回传时统一发 WGS-84）
 function locateMe() {
   if (!navigator.geolocation) return;
   let retries = 0;
@@ -310,6 +312,7 @@ function locateMe() {
     locationWatchId = navigator.geolocation.watchPosition(
       (pos) => {
         retries = 0;
+        myPosWgs = { lat: pos.coords.latitude, lng: pos.coords.longitude };
         const [lng, lat] = wgs84ToGcj02(pos.coords.longitude, pos.coords.latitude);
         myPos = new AMap.LngLat(lng, lat);
         // 方向：指南针优先（实时、静止也转）；指南针未就绪时退回 GPS 行进方向
@@ -344,16 +347,16 @@ function locateMe() {
   startWatch();
 }
 
-// 双向共享：把自己的位置（GCJ-02）定期通过数据通道回传给分享者，
+// 双向共享：把自己的位置（WGS-84，对称协议）定期通过数据通道回传给分享者，
 // 让分享者首页地图也能实时看到好友（接收端）的位置。
 function sendMyLocation() {
-  if (!dc || dc.readyState !== "open" || !myPos) return;
+  if (!dc || dc.readyState !== "open" || !myPosWgs) return;
   try {
     dc.send(
       JSON.stringify({
         type: "loc",
-        lat: myPos.lat,
-        lng: myPos.lng,
+        lat: myPosWgs.lat,
+        lng: myPosWgs.lng,
         heading: myHeading != null ? Math.round(myHeading) : null,
         acc: 0,
         t: Date.now(),
@@ -437,6 +440,27 @@ async function init() {
   bindUserCenterEvents();
   $("locBtn").addEventListener("click", toggleFollow);
 
+  // HIA 圆形按键：弹出/收起「退出位置共享」面板（同安卓 App）
+  $("hiaBtn").addEventListener("click", () => {
+    if ($("exitPanel").style.display !== "none") {
+      $("exitPanel").style.display = "none";
+      $("exitOverlay").style.display = "none";
+      return;
+    }
+    updateExitPanel();
+    $("exitOverlay").style.display = "block";
+    $("exitPanel").style.display = "block";
+  });
+  $("exitOverlay").addEventListener("click", () => {
+    $("exitPanel").style.display = "none";
+    $("exitOverlay").style.display = "none";
+  });
+  $("exitClose").addEventListener("click", () => {
+    $("exitPanel").style.display = "none";
+    $("exitOverlay").style.display = "none";
+  });
+  $("exitBtn").addEventListener("click", stopSharing);
+
   signaling = await connectSignaling("hereiam_" + code, onSignal);
   setStatus("等待好友分享…");
   // 通知分享者有好友加入，分享者据此建立 P2P 连接（携带本好友唯一 ID）
@@ -483,6 +507,7 @@ async function onSignal(msg) {
       dc = null;
     }
     removeDriverMarker();
+    if ($("exitStatus")) $("exitStatus").textContent = "对方已结束共享";
   }
 }
 
@@ -548,8 +573,10 @@ async function handleOffer(offer) {
     const st = pc.connectionState;
     if (st === "connected") {
       setStatus("已点对点直连", true);
+      updateExitPanel();
     } else if (st === "disconnected" || st === "failed") {
       setStatus("连接中断，正在自动重连…");
+      updateExitPanel();
       // 分享者端也会自动重连；这里同时重启 join 定时器，双保险
       startJoinTimer();
     }
@@ -642,6 +669,29 @@ function onLocation(m) {
       }
     });
   }
+}
+
+// 更新退出面板的连接状态
+function updateExitPanel() {
+  const el = $("exitStatus");
+  if (!el) return;
+  const connected = pc && pc.connectionState === "connected";
+  el.textContent = connected
+    ? "已连接，正在查看好友位置"
+    : "连接中…";
+}
+
+// 好友主动退出位置共享（同安卓 App 的 HIA 键 → 停止查看）
+function stopSharing() {
+  sendLeave();                                   // 通知分享者本好友已退出
+  if (joinTimer) { clearInterval(joinTimer); joinTimer = null; }
+  if (pc) { try { pc.close(); } catch (e) {} pc = null; dc = null; }
+  if (signaling) { try { signaling.close(); } catch (e) {} signaling = null; }
+  if (locationWatchId != null) { navigator.geolocation.clearWatch(locationWatchId); locationWatchId = null; }
+  removeDriverMarker();
+  $("exitPanel").style.display = "none";
+  $("exitOverlay").style.display = "none";
+  setStatus("已退出位置共享", false);
 }
 
 // 好友退出：通知对方释放连接。移动端浏览器 beforeunload 不一定可靠，
