@@ -358,7 +358,7 @@ function updateMyMarker() {
     if (!myHasCentered) { myHasCentered = true; map.setCenter(pos); }
   } else {
     myMarker.setPosition(pos);
-    updateArrowG(myArrowG, myPos.heading);
+    updateMyArrow();   // 方向跟随自己时恒朝上，否则按 heading+旋转补偿
     setMyLocated(myGray);
   }
   // 跟随自己：位置真正变化时自动居中（保留当前缩放，总览模式下暂停，同安卓 App）
@@ -451,8 +451,8 @@ function updateDirectionFollow() {
   refreshAllArrows(); // 旋转后立即刷新箭头：方向跟随下目标指针 = heading + rotation = 0（朝上）
 }
 
-// 方向跟随持续循环：每 100ms 同步一次地图旋转（仅 followDirection=true 时生效）
-setInterval(updateDirectionFollow, 100);
+// 方向跟随持续循环：每 50ms 同步一次地图旋转 + 刷新箭头（仅 followDirection=true 时生效）
+setInterval(updateDirectionFollow, 50);
 
 // 聚焦/总览都带「朝正北」：同时设置中心、缩放、朝向归零
 function setCameraNorth(zoom, center) {
@@ -669,7 +669,7 @@ function showDriverAt(pos, heading, gray) {
     if (!hasCentered) { hasCentered = true; map.setCenter(pos); }
   } else {
     driverMarker.setPosition(pos);
-    updateArrowG(driverArrowG, heading);
+    updateDriverArrow();   // 方向跟随对端时恒朝上，否则按 heading+旋转补偿
     setDriverLocated(gray);
   }
   // 跟随好友：位置更新自动居中（保留当前缩放，总览模式下暂停，同安卓 App）
