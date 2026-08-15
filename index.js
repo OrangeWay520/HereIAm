@@ -42,10 +42,16 @@ const friendId = Math.random().toString(36).slice(2, 10) + Date.now().toString(3
 // ========== 顶部用户选择器 / 定位按钮状态（同安卓 App） ==========
 // 当前跟随目标："me"=自己位置居中 / "friend"=对端好友位置居中 / null=不跟随
 let followTarget = "me";
-// 定位按钮状态：0=聚焦目标（居中放大+朝北）, 1=总览全部（缩小显示所有人+朝北）；点击循环切换
+// 定位按钮状态：0=聚焦正北, 1=方向跟随（目标朝向朝上，实时旋转）, 2=总览正北；点击循环切换
 let locStep = 0;
+// 方向跟随模式：地图实时旋转，使选中用户「当前运动方向/手机朝向」始终朝上（同高德/百度方向跟随）
+let followDirection = false;
+// 进入方向跟随的时刻：进入后短暂延迟再接管旋转，避免打断「居中+放大」动画（同安卓端 700ms）
+let directionFollowSince = 0;
 // 总览模式：定位键切到「总览全部」时置 true，暂停自动跟随；不改变用户选择框的选中项
 let overviewMode = false;
+// 对端好友的最新朝向（方向跟随用，由 showDriverAt 实时更新）
+let driverHeading = null;
 // 自动跟随去重：仅在位置真正变化时居中，避免指南针 80ms 刷新把地图反复拉回
 let lastFollowCenter = null;
 
@@ -367,15 +373,18 @@ function updateMyMarker() {
 }
 
 // ============================================================
-//  定位按钮（右下角）：点击循环切换「聚焦目标」/「总览全部」（同安卓 App）
-//  每次点击都同时把地图调整到正北（rotation=0、tilt=0），没有单独的朝北操作。
-//  注意：聚焦/总览不改变用户选择框的选中项（followTarget 仅由选择器修改）
+//  定位按钮（右下角）：点击循环切换「聚焦正北」/「方向跟随」/「总览正北」（同安卓 App）
+//  点击①聚焦正北：居中到选中的人 + 放大 + 朝正北
+//  点击②方向跟随：居中到选中的人 + 放大 + 目标朝向朝上（持续同步地图旋转）
+//  点击③总览正北：缩小显示所有人（自己+对端好友）+ 朝正北
+//  注意：聚焦/总览/方向跟随都不改变用户选择框的选中项（followTarget 仅由选择器修改）
 // ============================================================
 function onLocateClick() {
   if (!map) return;
-  locStep = (locStep + 1) % 2;
+  locStep = (locStep + 1) % 3;
   if (locStep === 0) {
-    // 聚焦：将选中的人居中放大 + 地图调回正北
+    // 聚焦正北：将选中的人居中放大 + 地图调回正北
+    followDirection = false;
     overviewMode = false;
     let target = null;
     if (followTarget === "friend" && driverMarker) {
@@ -387,12 +396,61 @@ function onLocateClick() {
     if (target) {
       setCameraNorth(17, target); // 同安卓 FOCUS_ZOOM=17
     }
+  } else if (locStep === 1) {
+    // 方向跟随：居中放大 + 目标朝向朝上（后续由 updateDirectionFollow 持续同步旋转）
+    followDirection = true;
+    overviewMode = false;
+    directionFollowSince = Date.now(); // 短暂延迟后再接管旋转，避免打断居中动画
+    let target = null;
+    if (followTarget === "friend" && driverMarker) {
+      target = driverMarker.getPosition();
+    } else if (myPos) {
+      const [lng, lat] = wgs84ToGcj02(myPos.lng, myPos.lat);
+      target = new AMap.LngLat(lng, lat);
+    }
+    if (target) {
+      const h = getDirectionHeading();
+      const rot = h != null ? (360 - h) % 360 : 0;
+      if (typeof map.setCameraPosition === "function") {
+        map.setCameraPosition({ target: target, zoom: 17, tilt: 0, rotation: rot });
+      } else {
+        if (map.setRotation) map.setRotation(rot);
+        if (map.setTilt) map.setTilt(0);
+        map.setZoomAndCenter(17, target);
+      }
+    }
   } else {
-    // 总览：缩小显示全部 + 地图调回正北（不改变 followTarget，让用户选择框保持选中状态）
+    // 总览正北：缩小显示全部 + 地图调回正北（不改变 followTarget，让用户选择框保持选中状态）
+    followDirection = false;
     overviewMode = true;
     fitAllPositions(); // 内部已复位正北
   }
 }
+
+// 方向跟随用：获取选中目标的最新朝向（自己=手机朝向/指南针；对端=对端回传朝向，兜底用指南针）
+function getDirectionHeading() {
+  if (followTarget === "friend" && driverMarker) {
+    if (driverHeading != null) return driverHeading;
+    if (deviceHeading != null) return deviceHeading;
+    return null;
+  }
+  if (deviceHeading != null) return deviceHeading;
+  if (myPos && myPos.heading != null) return myPos.heading;
+  return null;
+}
+
+// 方向跟随：把地图旋转到「目标朝向朝上」（map.setRotation 为顺时针，heading 为逆时针 → 用 360-heading）
+function updateDirectionFollow() {
+  if (!map || !followDirection) return;
+  if (Date.now() - directionFollowSince < 700) return; // 等待「居中+旋转」动画播完，同安卓端 700ms
+  const h = getDirectionHeading();
+  if (h == null) return;
+  const rot = (360 - h) % 360;
+  if (map.setRotation) map.setRotation(rot);
+}
+
+// 方向跟随持续循环：每 100ms 同步一次地图旋转（仅 followDirection=true 时生效）
+setInterval(updateDirectionFollow, 100);
 
 // 聚焦/总览都带「朝正北」：同时设置中心、缩放、朝向归零
 function setCameraNorth(zoom, center) {
@@ -531,6 +589,7 @@ function removeDriverMarker() {
   driverNameEl = null;
   driverAvatarData = null;
   driverName = null;
+  driverHeading = null;   // 清除对端朝向缓存（方向跟随用）
   driverGlow = null;
   driverPtr = null;
   driverDisc = null;
@@ -588,6 +647,8 @@ function onLocation(m) {
 // @param gray true=对方定位信号不佳（灰色定位标），false=已精确定位（蓝色）；灰色时指针仍按 heading 转动
 function showDriverAt(pos, heading, gray) {
   if (!map) return;
+  // 记录对端最新朝向（方向跟随用，实时更新）
+  if (heading != null) driverHeading = heading;
   if (!driverMarker) {
     const created = createDriverMarker(pos, heading);
     driverMarker = created.marker;
@@ -726,6 +787,8 @@ function initUserSelector() {
     e.stopPropagation();
     followTarget = followTarget === "me" ? null : "me";
     overviewMode = false;
+    followDirection = false;   // 选择某人即退出方向跟随（同安卓端）
+    locStep = 0;               // 定位键回到聚焦态
     if (followTarget === "me" && myPos) {
       const [lng, lat] = wgs84ToGcj02(myPos.lng, myPos.lat);
       map.setZoomAndCenter(16, new AMap.LngLat(lng, lat));
@@ -740,6 +803,8 @@ function initUserSelector() {
     if (!driverMarker) return;
     followTarget = followTarget === "friend" ? null : "friend";
     overviewMode = false;
+    followDirection = false;   // 选择某人即退出方向跟随（同安卓端）
+    locStep = 0;               // 定位键回到聚焦态
     if (followTarget === "friend") {
       map.setZoomAndCenter(16, driverMarker.getPosition());
     }
@@ -800,6 +865,8 @@ function renderCircleAvatar(el, dataUrl, fallbackChar) {
 function revertToMe() {
   followTarget = "me";
   overviewMode = false;
+  followDirection = false;   // 退出方向跟随（同安卓端 revertToMe）
+  locStep = 0;               // 定位键回到聚焦态，下次点击从「放大」开始
   lastFollowCenter = null;
   if (myPos) {
     const [lng, lat] = wgs84ToGcj02(myPos.lng, myPos.lat);
