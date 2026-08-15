@@ -86,6 +86,16 @@ function initMap() {
     const ph = document.querySelector("#map p");
     if (ph) ph.remove();
     map = new AMap.Map("map", { zoom: 16, center: [116.397428, 39.90923], rotateEnable: true });
+    // 手动旋转（鼠标右键/双指）也会改变地图方向：监听旋转事件，同步权威值并刷新指针，
+    // 保证指针真实方向始终与地图方向固定一致
+    const onMapRotated = () => { syncMapRotFromMap(); refreshAllArrows(); };
+    if (map.on) {
+      map.on("rotating", onMapRotated);
+      map.on("rotate", onMapRotated);
+      map.on("viewchange", onMapRotated);
+    }
+    syncMapRotFromMap();
+    refreshAllArrows();
   };
   document.head.appendChild(s);
 }
@@ -358,7 +368,7 @@ function updateMyMarker() {
     if (!myHasCentered) { myHasCentered = true; map.setCenter(pos); }
   } else {
     myMarker.setPosition(pos);
-    updateMyArrow();   // 方向跟随自己时恒朝上，否则按 heading+旋转补偿
+    updateArrowG(myArrowG, myPos.heading);   // 方向跟随自己时恒朝上，否则按 heading+旋转补偿
     setMyLocated(myGray);
   }
   // 跟随自己：位置真正变化时自动居中（保留当前缩放，总览模式下暂停，同安卓 App）
@@ -448,6 +458,25 @@ let rotAnimId = null;         // 旋转补间 rAF id
 let rotAnimFrom = 0;          // 起始旋转角
 let rotAnimDelta = 0;         // 最短有符号角度差（-180, 180]
 
+// 地图当前旋转角「权威值」：程序旋转时与本变量同步更新；手动旋转由 rotating/rotate 事件同步。
+// 定位标是屏幕方向的 HTML 覆盖物，不随地图旋转，指针角度 = heading + 地图旋转角，
+// 因此必须用本权威值（而不是 getRotation()，它可能不即时反映 setRotation）保证指针与地图方向严格一致。
+let currentMapRot = 0;
+
+function syncMapRotFromMap() {
+  if (map && typeof map.getRotation === "function") {
+    currentMapRot = ((map.getRotation() || 0) % 360 + 360) % 360;
+  }
+  return currentMapRot;
+}
+
+function setMapRot(rot) {
+  const r = ((rot % 360) + 360) % 360;
+  if (map && map.setRotation) map.setRotation(r, true); // 先瞬时旋转地图
+  currentMapRot = r; // 再写权威值（即使旋转事件已异步同步，也以本目标值为准）
+  return currentMapRot;
+}
+
 function cancelRotAnim() {
   if (rotAnimId) { cancelAnimationFrame(rotAnimId); rotAnimId = null; }
 }
@@ -457,14 +486,14 @@ function cancelRotAnim() {
  * 计算当前角与目标角的最小有符号差，沿最短方向旋转，避免高德绕大圈。
  */
 function rotateMapShortest(targetRot, duration) {
-  if (!map || typeof map.getRotation !== "function" || typeof map.setRotation !== "function") return;
+  if (!map || typeof map.setRotation !== "function") return;
   cancelRotAnim();
-  const cur = ((map.getRotation() || 0) % 360 + 360) % 360;
+  const cur = currentMapRot; // 用权威值，避免 getRotation() 延迟
   const target = ((targetRot % 360) + 360) % 360;
   let delta = target - cur;
   if (delta > 180) delta -= 360;
   if (delta < -180) delta += 360;
-  if (Math.abs(delta) < 0.01) { refreshAllArrows(); return; } // 已到位
+  if (Math.abs(delta) < 0.01) { setMapRot(target); refreshAllArrows(); return; } // 已到位
   const dur = (typeof duration === "number" && duration > 0) ? duration : 300;
   const start = performance.now();
   rotAnimFrom = cur;
@@ -473,13 +502,13 @@ function rotateMapShortest(targetRot, duration) {
     const t = Math.min(1, (now - start) / dur);
     const e = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; // easeInOutCubic
     const angle = ((rotAnimFrom + rotAnimDelta * e) % 360 + 360) % 360;
-    map.setRotation(angle, true); // 每帧直接设置，避免高德自带动画叠加
-    refreshAllArrows();
+    setMapRot(angle); // 同步权威值 + 旋转地图
+    refreshAllArrows(); // 每帧刷新指针，与地图旋转严格同步
     if (t < 1) {
       rotAnimId = requestAnimationFrame(step);
     } else {
       rotAnimId = null;
-      map.setRotation(rotAnimFrom + rotAnimDelta, true); // 精确落位
+      setMapRot(rotAnimFrom + rotAnimDelta); // 精确落位
       refreshAllArrows();
     }
   };
@@ -494,7 +523,7 @@ function updateDirectionFollow() {
   const h = getDirectionHeading();
   if (h == null) return;
   const rot = (360 - h) % 360;
-  if (map.setRotation) map.setRotation(rot, true); // 持续跟随用瞬时设置，50ms 一轮已足够平滑
+  setMapRot(rot); // 同步权威值 + 瞬时旋转（50ms 一轮已足够平滑）
   refreshAllArrows(); // 旋转后立即刷新箭头：方向跟随下目标指针 = heading + rotation = 0（朝上）
 }
 
@@ -711,7 +740,7 @@ function showDriverAt(pos, heading, gray) {
     if (!hasCentered) { hasCentered = true; map.setCenter(pos); }
   } else {
     driverMarker.setPosition(pos);
-    updateDriverArrow();   // 方向跟随对端时恒朝上，否则按 heading+旋转补偿
+    updateArrowG(driverArrowG, heading);   // 方向跟随对端时恒朝上，否则按 heading+旋转补偿
     setDriverLocated(gray);
   }
   // 跟随好友：位置更新自动居中（保留当前缩放，总览模式下暂停，同安卓 App）
@@ -945,13 +974,12 @@ function buildPointerPathD() {
     " Z";
 }
 
-// 定位标指针角度：heading + 地图顺时针旋转角 getRotation()。
+// 定位标指针角度：heading + 地图当前旋转角 currentMapRot。
 // marker 是屏幕方向的 HTML 覆盖物，不随地图旋转；地图旋转 r 度后真实朝向在屏幕上偏转 r 度，
 // 因此指针要加回 r 才始终指向真实朝向（方向跟随里 rotation=(360-heading)，指针=heading+360-heading=0=朝上）
 function markerArrowAngle(heading) {
   if (heading == null) return null;
-  const rot = (map && typeof map.getRotation === "function") ? (map.getRotation() || 0) : 0;
-  return (((heading + rot) % 360) + 360) % 360;
+  return (((heading + currentMapRot) % 360) + 360) % 360;
 }
 
 function updateArrowG(g, heading) {
