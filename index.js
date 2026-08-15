@@ -35,6 +35,9 @@ let driverAvatarData = null, driverName = null; // 分享者资料暂存（marke
 let hasCentered = false;
 // 对端定位标颜色元素（灰/蓝切换用）
 let driverGlow = null, driverPtr = null, driverDisc = null;
+// 定位标白/黑边框元素（浅色=白外轮廓+白圆周线，深色=黑，随系统深浅色切换）
+let driverWdp = null, driverStroke = null; // 分享者定位标
+let myWdp = null, myStroke = null;         // 自己定位标
 
 // 本好友会话唯一 ID（查看模式用）
 const friendId = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
@@ -76,6 +79,13 @@ function canUseWebGL2() {
   } catch (e) { return false; }
 }
 
+// 深色模式边框色：白色外轮廓/圆周线在深色地图上改为黑色（与安卓端一致）
+function markerBorderColor() {
+  return (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches)
+    ? "#000000"
+    : "#ffffff";
+}
+
 // ============================================================
 //  深色模式：地图底图自动跟随系统（prefers-color-scheme）
 // ============================================================
@@ -83,6 +93,14 @@ function applyMapTheme() {
   if (!map || !map.setMapStyle) return;
   const dark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
   map.setMapStyle(dark ? "amap://styles/dark" : "amap://styles/normal");
+  // 同步水滴标白/黑边框（深色地图上白边框过亮，改黑色，与安卓一致）
+  const bc = markerBorderColor();
+  if (driverWdp) driverWdp.setAttribute("fill", bc);
+  if (driverStroke) driverStroke.setAttribute("stroke", bc);
+  if (myWdp) myWdp.setAttribute("fill", bc);
+  if (myStroke) myStroke.setAttribute("stroke", bc);
+  // 刷新定位键水滴图标（白缝颜色随深浅色）
+  setLocateIcon();
 }
 
 // 监听系统深浅色切换，实时更新地图底图
@@ -382,6 +400,8 @@ function updateMyMarker() {
     myGlow = created.glowPath;
     myPtr = created.ptrPath;
     myDisc = created.discPath;
+    myWdp = created.wdp;
+    myStroke = created.strokeCircle;
     map.add(myMarker);
     setMyLocated(myGray);
     // 首次定位成功后自动把地图焦点移到当前位置
@@ -420,21 +440,24 @@ const LOCATE_ICON_CROSS =
   '<line x1="1.5" y1="12" x2="5" y2="12"/>' +
   '<line x1="19" y1="12" x2="22.5" y2="12"/>' +
   '</svg>';
-// 水滴标（方向跟随模式：蓝圆盘+白缝+外凸水滴箭头朝正北，同地图定位标画法）
-const LOCATE_ICON_WATERDROP =
+// 水滴标（方向跟随模式：蓝圆盘+白缝+外凸水滴箭头朝正北，同地图定位标画法；白缝深色模式下改黑色）
+function buildLocateIconWaterdrop() {
+  return (
   '<svg viewBox="0 0 24 24" fill="none">' +
   '<path d="M13 1 L19.02 9.53 A6.95 6.95 0 1 1 6.98 9.53 Z" fill="none" stroke="#2F86F6" stroke-opacity="0.28" stroke-width="1.3"/>' +
-  '<path d="M13 1 L19.02 9.53 A6.95 6.95 0 1 1 6.98 9.53 Z" fill="#fff"/>' +
+  '<path d="M13 1 L19.02 9.53 A6.95 6.95 0 1 1 6.98 9.53 Z" fill="' + markerBorderColor() + '"/>' +
   '<path d="M13 1 L18.2 10 L7.8 10 Z" fill="#2F86F6"/>' +
   '<circle cx="13" cy="13" r="6" fill="#2F86F6"/>' +
-  '<circle cx="13" cy="13" r="6" fill="none" stroke="#fff" stroke-width="1.2"/>' +
-  '</svg>';
+  '<circle cx="13" cy="13" r="6" fill="none" stroke="' + markerBorderColor() + '" stroke-width="1.2"/>' +
+  '</svg>'
+  );
+}
 
 // 根据当前定位键状态刷新图标：locStep=1（方向跟随）显示水滴标，其余显示十字准星
 function setLocateIcon() {
   const btn = $("locateBtn");
   if (!btn) return;
-  btn.innerHTML = locStep === 1 ? LOCATE_ICON_WATERDROP : LOCATE_ICON_CROSS;
+  btn.innerHTML = locStep === 1 ? buildLocateIconWaterdrop() : LOCATE_ICON_CROSS;
 }
 
 function onLocateClick() {
@@ -718,6 +741,8 @@ function removeDriverMarker() {
   driverGlow = null;
   driverPtr = null;
   driverDisc = null;
+  driverWdp = null;
+  driverStroke = null;
   hasCentered = false;
 }
 
@@ -783,6 +808,8 @@ function showDriverAt(pos, heading, gray) {
     driverGlow = created.glowPath;
     driverPtr = created.ptrPath;
     driverDisc = created.discPath;
+    driverWdp = created.wdp;
+    driverStroke = created.strokeCircle;
     map.add(driverMarker);
     setDriverLocated(gray);
     // 若资料在位置之前到达，此处补上名字/头像
@@ -818,7 +845,7 @@ function createDriverMarker(pos, heading) {
     '<feGaussianBlur stdDeviation="' + (2.2 * M_SCALE).toFixed(2) + '"/></filter></defs>' +
     '<g id="arrowG" transform="rotate(' + (markerArrowAngle(heading) || 0) + " " + M_CX + " " + M_CY + ')">' +
     '<path id="glowPath" d="' + buildWaterdropPathD(M_R_WHITE) + '" fill="none" stroke="rgba(47,134,246,0.28)" stroke-width="' + (5 * M_SCALE).toFixed(2) + '" stroke-linejoin="round" filter="url(#glowF)"/>' +
-    '<path d="' + buildWaterdropPathD(M_R_WHITE) + '" fill="#ffffff"/>' +
+    '<path id="wdPath" d="' + buildWaterdropPathD(M_R_WHITE) + '" fill="' + markerBorderColor() + '"/>' +
     '<path id="ptrPath" d="' + buildPointerPathD() + '" fill="rgba(47,134,246,0.96)"/>' +
     "</g>" +
     '<circle id="discPath" cx="' + M_CX + '" cy="' + M_CY + '" r="' + M_R.toFixed(2) + '" fill="rgba(47,134,246,0.96)"/>' +
@@ -827,8 +854,8 @@ function createDriverMarker(pos, heading) {
     '<image id="avatarImg" x="' + (M_CX - M_AVATAR_R).toFixed(2) + '" y="' + (M_CY - M_AVATAR_R).toFixed(2) +
     '" width="' + (M_AVATAR_R * 2).toFixed(2) + '" height="' + (M_AVATAR_R * 2).toFixed(2) +
     '" clip-path="url(#avatarClip)" style="display:none;pointer-events:none;"/>' +
-    // 5. 初始圆的白色轮廓（白色圆周线，分隔圆盘与指针；有头像时隐藏，白边由头像外圈提供）
-    '<circle id="avatarStroke" cx="' + M_CX + '" cy="' + M_CY + '" r="' + M_R.toFixed(2) + '" fill="none" stroke="#ffffff" stroke-width="' + M_WHITE_BORDER.toFixed(2) + '"/>' +
+    // 5. 初始圆的白色轮廓（白色圆周线，分隔圆盘与指针；有头像时隐藏，白边由头像外圈提供；深色模式下改黑色）
+    '<circle id="avatarStroke" cx="' + M_CX + '" cy="' + M_CY + '" r="' + M_R.toFixed(2) + '" fill="none" stroke="' + markerBorderColor() + '" stroke-width="' + M_WHITE_BORDER.toFixed(2) + '"/>' +
     "</svg>";
   // 分享者名字气泡（显示在地标上方）
   const nameEl = document.createElement("div");
@@ -843,6 +870,9 @@ function createDriverMarker(pos, heading) {
     position: pos, content: content,
     offset: new AMap.Pixel(-M_CX, -M_CY), zIndex: 120,
   });
+  // 白色外轮廓水滴 path + 白色圆周线 circle（深浅色切换时更新颜色）
+  const wdp = content.querySelector("#wdPath");
+  const strokeCircle = content.querySelector("#avatarStroke");
   return {
     marker,
     arrowG: content.querySelector("#arrowG"),
@@ -851,6 +881,7 @@ function createDriverMarker(pos, heading) {
     glowPath: content.querySelector("#glowPath"),
     ptrPath: content.querySelector("#ptrPath"),
     discPath: content.querySelector("#discPath"),
+    wdp, strokeCircle,
   };
 }
 

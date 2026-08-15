@@ -23,6 +23,9 @@ let myMarker = null; // 好友自己位置（水滴 + 指南针指针）
 let myArrowG = null; // 好友自己定位标内的方向指针(<g>)
 // 好友自己定位标颜色元素（灰/蓝切换用）
 let myGlow = null, myPtr = null, myDisc = null;
+// 定位标白/黑边框元素（浅色=白外轮廓+白圆周线，深色=黑，随系统深浅色切换）
+let driverWdp = null, driverStroke = null; // 分享者定位标
+let myWdp = null, myStroke = null;         // 自己定位标
 let myHasCentered = false;
 let myPos = null; // 好友自己坐标(GCJ-02)
 let myHeading = null; // 好友自己的方向（指南针/GPS 融合，静止也转）
@@ -58,11 +61,24 @@ function canUseWebGL2() {
   }
 }
 
+// 深色模式边框色：白色外轮廓/圆周线在深色地图上改为黑色（与安卓端一致）
+function markerBorderColor() {
+  return (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches)
+    ? "#000000"
+    : "#ffffff";
+}
+
 // 深色模式：地图底图自动跟随系统（prefers-color-scheme）
 function applyMapTheme() {
   if (!map || !map.setMapStyle) return;
   const dark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
   map.setMapStyle(dark ? "amap://styles/dark" : "amap://styles/normal");
+  // 同步水滴标白/黑边框（深色地图上白边框过亮，改黑色，与安卓一致）
+  const bc = markerBorderColor();
+  if (driverWdp) driverWdp.setAttribute("fill", bc);
+  if (driverStroke) driverStroke.setAttribute("stroke", bc);
+  if (myWdp) myWdp.setAttribute("fill", bc);
+  if (myStroke) myStroke.setAttribute("stroke", bc);
 }
 
 // 监听系统深浅色切换，实时更新地图底图
@@ -143,8 +159,8 @@ function createDriverMarker(pos, heading) {
     '<g id="arrowG" transform="rotate(' + (heading || 0) + " " + M_CX + " " + M_CY + ')">' +
     // 1. 蓝色发散光晕（单层淡蓝 + 模糊，隐隐发散，替代灰色阴影）
     '<path id="glowPath" d="' + buildWaterdropPathD(M_R_WHITE) + '" fill="none" stroke="rgba(47,134,246,0.28)" stroke-width="' + (5 * M_SCALE).toFixed(2) + '" stroke-linejoin="round" filter="url(#glowF)"/>' +
-    // 2. 白色底层水滴（r = R+W = 25.5，外圈白色轮廓，无灰色描边）
-    '<path d="' + buildWaterdropPathD(M_R_WHITE) + '" fill="#ffffff"/>' +
+    // 2. 白色底层水滴（r = R+W = 25.5，外圈白色轮廓，无灰色描边；深色模式下改黑色）
+    '<path id="wdPath" d="' + buildWaterdropPathD(M_R_WHITE) + '" fill="' + markerBorderColor() + '"/>' +
     // 3. 蓝色指针（圆外切线区域：尖顶 + 两切点围成的三角形，随旋转层旋转）
     '<path id="ptrPath" d="' + buildPointerPathD() + '" fill="rgba(47,134,246,0.96)"/>' +
     "</g>" +
@@ -156,8 +172,8 @@ function createDriverMarker(pos, heading) {
     '<image id="avatarImg" x="' + (M_CX - M_AVATAR_R).toFixed(2) + '" y="' + (M_CY - M_AVATAR_R).toFixed(2) +
     '" width="' + (M_AVATAR_R * 2).toFixed(2) + '" height="' + (M_AVATAR_R * 2).toFixed(2) +
     '" clip-path="url(#avatarClip)" style="display:none;pointer-events:none;"/>' +
-    // 5. 初始圆的白色轮廓（白色圆周线，分隔圆盘与指针；有头像时隐藏，白边由头像外圈提供）
-    '<circle id="avatarStroke" cx="' + M_CX + '" cy="' + M_CY + '" r="' + M_R.toFixed(2) + '" fill="none" stroke="#ffffff" stroke-width="' + M_WHITE_BORDER.toFixed(2) + '"/>' +
+    // 5. 初始圆的白色轮廓（白色圆周线，分隔圆盘与指针；有头像时隐藏，白边由头像外圈提供；深色模式下改黑色）
+    '<circle id="avatarStroke" cx="' + M_CX + '" cy="' + M_CY + '" r="' + M_R.toFixed(2) + '" fill="none" stroke="' + markerBorderColor() + '" stroke-width="' + M_WHITE_BORDER.toFixed(2) + '"/>' +
     "</svg>";
 
   const marker = new AMap.Marker({
@@ -178,11 +194,15 @@ function createDriverMarker(pos, heading) {
   content.appendChild(nameEl);
   const arrowG = content.querySelector("#arrowG");
   const avatarImg = content.querySelector("#avatarImg");
+  // 白色外轮廓水滴 path + 白色圆周线 circle（深浅色切换时更新颜色）
+  const wdp = content.querySelector("#wdPath");
+  const strokeCircle = content.querySelector("#avatarStroke");
   return {
     marker, arrowG, avatarImg, nameEl,
     glowPath: content.querySelector("#glowPath"),
     ptrPath: content.querySelector("#ptrPath"),
     discPath: content.querySelector("#discPath"),
+    wdp, strokeCircle,
   };
 }
 
@@ -381,6 +401,8 @@ function locateMe() {
           myGlow = created.glowPath;
           myPtr = created.ptrPath;
           myDisc = created.discPath;
+          myWdp = created.wdp;
+          myStroke = created.strokeCircle;
           map.add(myMarker);
           setMyLocated(myGray);
           if (!myHasCentered) { myHasCentered = true; map.setCenter(myPos); }
@@ -601,6 +623,8 @@ function removeDriverMarker() {
   driverNameEl = null;
   driverAvatarData = null;
   driverName = null;
+  driverWdp = null;
+  driverStroke = null;
   follow = false;
   const btn = $("locBtn");
   if (btn) btn.classList.remove("active");
@@ -722,6 +746,8 @@ function onLocation(m) {
     driverGlow = created.glowPath;
     driverPtr = created.ptrPath;
     driverDisc = created.discPath;
+    driverWdp = created.wdp;
+    driverStroke = created.strokeCircle;
     map.add(driverMarker);
     setDriverLocated(gray);
     // 若资料在位置之前到达，此处补上名字/头像
