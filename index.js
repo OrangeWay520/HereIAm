@@ -385,13 +385,12 @@ function onLocateClick() {
       target = new AMap.LngLat(lng, lat);
     }
     if (target) {
-      setCameraNorth(16, target);
+      setCameraNorth(17, target); // 同安卓 FOCUS_ZOOM=17
     }
   } else {
     // 总览：缩小显示全部 + 地图调回正北（不改变 followTarget，让用户选择框保持选中状态）
     overviewMode = true;
-    fitAllPositions();
-    resetMapNorth();
+    fitAllPositions(); // 内部已复位正北
   }
 }
 
@@ -407,17 +406,22 @@ function setCameraNorth(zoom, center) {
   }
 }
 
-// 总览：把所有位置点纳入视野（自己 + 对端好友）
+// 总览：把所有位置点纳入视野（自己 + 对端好友），并保证恢复正北（同安卓 App）
 function fitAllPositions() {
   if (!map) return;
   const mks = [];
   if (myMarker) mks.push(myMarker);
   if (driverMarker) mks.push(driverMarker);
-  if (mks.length === 0) return;
-  if (mks.length === 1) {
-    map.setZoomAndCenter(14, mks[0].getPosition());
+  if (mks.length === 0) {
+    locStep = 0; // 无任何位置，退回聚焦态
     return;
   }
+  if (mks.length === 1) {
+    setCameraNorth(14, mks[0].getPosition());
+    return;
+  }
+  // 多人：先复位正北再适配视野（setFitView/setBounds 会保留当前旋转角，必须先归零）
+  resetMapNorth();
   if (typeof map.setFitView === "function") {
     map.setFitView(mks, false, [90, 90, 140, 90]);
   } else {
