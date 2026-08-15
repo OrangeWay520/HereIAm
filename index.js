@@ -85,7 +85,7 @@ function initMap() {
   s.onload = () => {
     const ph = document.querySelector("#map p");
     if (ph) ph.remove();
-    map = new AMap.Map("map", { zoom: 16, center: [116.397428, 39.90923] });
+    map = new AMap.Map("map", { zoom: 16, center: [116.397428, 39.90923], rotateEnable: true });
   };
   document.head.appendChild(s);
 }
@@ -411,13 +411,14 @@ function onLocateClick() {
     if (target) {
       const h = getDirectionHeading();
       const rot = h != null ? (360 - h) % 360 : 0;
-      if (typeof map.setCameraPosition === "function") {
-        map.setCameraPosition({ target: target, zoom: 17, tilt: 0, rotation: rot });
-      } else {
-        if (map.setRotation) map.setRotation(rot);
-        if (map.setTilt) map.setTilt(0);
+      if (typeof map.setTilt === "function") map.setTilt(0);
+      if (typeof map.setZoomAndCenter === "function") {
         map.setZoomAndCenter(17, target);
+      } else {
+        if (map.setCenter) map.setCenter(target);
+        if (map.setZoom) map.setZoom(17);
       }
+      rotateMapShortest(rot, 300); // 最短路径旋转到「目标朝向朝上」，避免绕大圈
       refreshAllArrows(); // 进入方向跟随立即刷新箭头：目标指针 = heading + rotation = 0（朝上）
     }
   } else {
@@ -440,30 +441,77 @@ function getDirectionHeading() {
   return null;
 }
 
+// ========== 地图旋转工具（最短路径 + 固定时长动画） ==========
+// 高德 setRotation(rot) 默认按「绝对值差」线性动画，角度差>180° 时会绕一大圈且动画时长
+// 由内部自动计算（偏长）。这里用手动 rAF 补间：只旋转最短角度差，固定 300ms，平滑不绕圈。
+let rotAnimId = null;         // 旋转补间 rAF id
+let rotAnimFrom = 0;          // 起始旋转角
+let rotAnimDelta = 0;         // 最短有符号角度差（-180, 180]
+
+function cancelRotAnim() {
+  if (rotAnimId) { cancelAnimationFrame(rotAnimId); rotAnimId = null; }
+}
+
+/**
+ * 最短路径旋转：把地图旋转角平滑过渡到 target（[0,360)），默认 300ms。
+ * 计算当前角与目标角的最小有符号差，沿最短方向旋转，避免高德绕大圈。
+ */
+function rotateMapShortest(targetRot, duration) {
+  if (!map || typeof map.getRotation !== "function" || typeof map.setRotation !== "function") return;
+  cancelRotAnim();
+  const cur = ((map.getRotation() || 0) % 360 + 360) % 360;
+  const target = ((targetRot % 360) + 360) % 360;
+  let delta = target - cur;
+  if (delta > 180) delta -= 360;
+  if (delta < -180) delta += 360;
+  if (Math.abs(delta) < 0.01) { refreshAllArrows(); return; } // 已到位
+  const dur = (typeof duration === "number" && duration > 0) ? duration : 300;
+  const start = performance.now();
+  rotAnimFrom = cur;
+  rotAnimDelta = delta;
+  const step = (now) => {
+    const t = Math.min(1, (now - start) / dur);
+    const e = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; // easeInOutCubic
+    const angle = ((rotAnimFrom + rotAnimDelta * e) % 360 + 360) % 360;
+    map.setRotation(angle, true); // 每帧直接设置，避免高德自带动画叠加
+    refreshAllArrows();
+    if (t < 1) {
+      rotAnimId = requestAnimationFrame(step);
+    } else {
+      rotAnimId = null;
+      map.setRotation(rotAnimFrom + rotAnimDelta, true); // 精确落位
+      refreshAllArrows();
+    }
+  };
+  rotAnimId = requestAnimationFrame(step);
+}
+
 // 方向跟随：把地图旋转到「目标朝向朝上」（map.setRotation 为顺时针，heading 为逆时针 → 用 360-heading）
 function updateDirectionFollow() {
   if (!map || !followDirection) return;
   if (Date.now() - directionFollowSince < 700) return; // 等待「居中+旋转」动画播完，同安卓端 700ms
+  cancelRotAnim(); // 接管前取消任何残留的补间动画
   const h = getDirectionHeading();
   if (h == null) return;
   const rot = (360 - h) % 360;
-  if (map.setRotation) map.setRotation(rot);
+  if (map.setRotation) map.setRotation(rot, true); // 持续跟随用瞬时设置，50ms 一轮已足够平滑
   refreshAllArrows(); // 旋转后立即刷新箭头：方向跟随下目标指针 = heading + rotation = 0（朝上）
 }
 
 // 方向跟随持续循环：每 50ms 同步一次地图旋转 + 刷新箭头（仅 followDirection=true 时生效）
 setInterval(updateDirectionFollow, 50);
 
-// 聚焦/总览都带「朝正北」：同时设置中心、缩放、朝向归零
+// 聚焦/总览都带「朝正北」：同时设置中心、缩放、朝向归零（旋转走最短路径快速回正）
 function setCameraNorth(zoom, center) {
   if (!map) return;
-  if (typeof map.setCameraPosition === "function") {
-    map.setCameraPosition({ target: center, zoom: zoom, tilt: 0, rotation: 0 });
-  } else {
-    if (map.setRotation) map.setRotation(0);
-    if (map.setTilt) map.setTilt(0);
+  if (typeof map.setTilt === "function") map.setTilt(0);
+  if (typeof map.setZoomAndCenter === "function") {
     map.setZoomAndCenter(zoom, center);
+  } else {
+    if (map.setCenter) map.setCenter(center);
+    if (map.setZoom) map.setZoom(zoom);
   }
+  rotateMapShortest(0, 300); // 最短路径快速回正北
   refreshAllArrows(); // 复位正北后刷新箭头（rotation 归零）
 }
 
@@ -493,17 +541,11 @@ function fitAllPositions() {
   }
 }
 
-// 复位朝北：rotation/tilt 归零（v2.0 用 setCameraPosition；v1.4 用 setRotation/setTilt）
+// 复位朝北：rotation/tilt 归零（走最短路径快速回正，保留当前中心与缩放）
 function resetMapNorth() {
   if (!map) return;
-  if (typeof map.setCameraPosition === "function") {
-    const cam = map.getCameraPosition();
-    map.setCameraPosition({ target: cam.target, zoom: cam.zoom, tilt: 0, rotation: 0 });
-  } else {
-    if (map.setRotation) map.setRotation(0);
-    if (map.setTilt) map.setTilt(0);
-    map.setZoomAndCenter(map.getZoom(), map.getCenter());
-  }
+  if (typeof map.setTilt === "function") map.setTilt(0);
+  rotateMapShortest(0, 300); // 最短路径快速回正北
   refreshAllArrows(); // 复位正北后刷新箭头（rotation 归零）
 }
 
