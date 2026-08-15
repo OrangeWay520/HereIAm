@@ -12,12 +12,14 @@
     :root {
       --bg: #f3f5f9; --card: #ffffff; --text: #1a1a2e; --text-secondary: #6b7280;
       --text-muted: #9ca3af; --border: #e5e7eb; --input-border: #d1d5db;
+      --btn-disabled: #c7c7d8;
     }
     /* ========== 深色模式：自动跟随系统 ========== */
     @media (prefers-color-scheme: dark) {
       :root {
         --bg: #121317; --card: #1e2026; --text: #f1f2f6; --text-secondary: #a6a9b6;
         --text-muted: #8a8f9d; --border: #2a2d35; --input-border: #3a3d47;
+        --btn-disabled: #4a4d5a;
       }
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -38,7 +40,7 @@
       width: 100%; padding: 14px; border: none; border-radius: 12px; font-size: 16px;
       background: #4b3fe3; color: #fff; cursor: pointer; font-weight: 600;
     }
-    .btn:disabled { background: #c7c7d8; cursor: not-allowed; }
+    .btn:disabled { background: var(--btn-disabled); cursor: not-allowed; }
     .status { margin-top: 12px; font-size: 13px; color: var(--text-secondary); text-align: center; }
     .status.on { color: #16a34a; font-weight: 600; }
     .qr { text-align: center; margin-top: 12px; }
@@ -61,8 +63,8 @@
   </div>
 
   <script src="https://cdn.ably.com/lib/ably.min-1.2.41.js"></script>
-  <script src="config.js?v=20260815b"></script>
-  <script src="signaling.js?v=20260815b"></script>
-  <script src="driver.js?v=20260815b"></script>
+  <script src="config.js?v=20260815x"></script>
+  <script src="signaling.js?v=20260815x"></script>
+  <script src="driver.js?v=20260815x"></script>
 </body>
 </html>
