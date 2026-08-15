@@ -389,6 +389,34 @@ function updateMyMarker() {
 //  点击③总览正北：缩小显示所有人（自己+对端好友）+ 朝正北
 //  注意：聚焦/总览/方向跟随都不改变用户选择框的选中项（followTarget 仅由选择器修改）
 // ============================================================
+// ========== 定位键图标：十字准星 ↔ 水滴标（方向跟随模式） ==========
+// 十字准星（聚焦/总览模式，同 App）
+const LOCATE_ICON_CROSS =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="#4b3fe3" stroke-width="2" stroke-linecap="round">' +
+  '<circle cx="12" cy="12" r="6"/>' +
+  '<circle cx="12" cy="12" r="2" fill="#4b3fe3" stroke="none"/>' +
+  '<line x1="12" y1="1.5" x2="12" y2="5"/>' +
+  '<line x1="12" y1="19" x2="12" y2="22.5"/>' +
+  '<line x1="1.5" y1="12" x2="5" y2="12"/>' +
+  '<line x1="19" y1="12" x2="22.5" y2="12"/>' +
+  '</svg>';
+// 水滴标（方向跟随模式：蓝圆盘+白缝+外凸水滴箭头朝正北，同地图定位标画法）
+const LOCATE_ICON_WATERDROP =
+  '<svg viewBox="0 0 24 24" fill="none">' +
+  '<path d="M13 1 L19.02 9.53 A6.95 6.95 0 1 1 6.98 9.53 Z" fill="none" stroke="#2F86F6" stroke-opacity="0.28" stroke-width="1.3"/>' +
+  '<path d="M13 1 L19.02 9.53 A6.95 6.95 0 1 1 6.98 9.53 Z" fill="#fff"/>' +
+  '<path d="M13 1 L18.2 10 L7.8 10 Z" fill="#2F86F6"/>' +
+  '<circle cx="13" cy="13" r="6" fill="#2F86F6"/>' +
+  '<circle cx="13" cy="13" r="6" fill="none" stroke="#fff" stroke-width="1.2"/>' +
+  '</svg>';
+
+// 根据当前定位键状态刷新图标：locStep=1（方向跟随）显示水滴标，其余显示十字准星
+function setLocateIcon() {
+  const btn = $("locateBtn");
+  if (!btn) return;
+  btn.innerHTML = locStep === 1 ? LOCATE_ICON_WATERDROP : LOCATE_ICON_CROSS;
+}
+
 function onLocateClick() {
   if (!map) return;
   locStep = (locStep + 1) % 3;
@@ -437,6 +465,7 @@ function onLocateClick() {
     overviewMode = true;
     fitAllPositions(); // 内部已复位正北
   }
+  setLocateIcon(); // 方向跟随（locStep=1）显示水滴标，其余显示十字准星
 }
 
 // 方向跟随用：获取选中目标的最新朝向（自己=手机朝向/指南针；对端=对端回传朝向，兜底用指南针）
@@ -552,6 +581,7 @@ function fitAllPositions() {
   if (driverMarker) mks.push(driverMarker);
   if (mks.length === 0) {
     locStep = 0; // 无任何位置，退回聚焦态
+    setLocateIcon();
     return;
   }
   if (mks.length === 1) {
@@ -864,6 +894,7 @@ function initUserSelector() {
     overviewMode = false;
     followDirection = false;   // 选择某人即退出方向跟随（同安卓端）
     locStep = 0;               // 定位键回到聚焦态
+    setLocateIcon();
     if (followTarget === "me" && myPos) {
       const [lng, lat] = wgs84ToGcj02(myPos.lng, myPos.lat);
       map.setZoomAndCenter(16, new AMap.LngLat(lng, lat));
@@ -880,6 +911,7 @@ function initUserSelector() {
     overviewMode = false;
     followDirection = false;   // 选择某人即退出方向跟随（同安卓端）
     locStep = 0;               // 定位键回到聚焦态
+    setLocateIcon();
     if (followTarget === "friend") {
       map.setZoomAndCenter(16, driverMarker.getPosition());
     }
@@ -942,6 +974,7 @@ function revertToMe() {
   overviewMode = false;
   followDirection = false;   // 退出方向跟随（同安卓端 revertToMe）
   locStep = 0;               // 定位键回到聚焦态，下次点击从「放大」开始
+  setLocateIcon();
   lastFollowCenter = null;
   if (myPos) {
     const [lng, lat] = wgs84ToGcj02(myPos.lng, myPos.lat);

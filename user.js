@@ -141,7 +141,7 @@ function setupCrop(img, dataUrl) {
   imgEl.style.width = dw + "px";
   imgEl.style.height = dh + "px";
   cropState = { nw: img.naturalWidth, nh: img.naturalHeight, dw: dw, dh: dh, dx: dx, dy: dy, srcImg: img };
-  const fs = Math.min(dw, dh) * 0.7;
+  const fs = Math.min(dw, dh); // 默认截取短边 100% 的居中区域（与安卓端 AvatarCropScreen 一致）
   setFrame(dx + (dw - fs) / 2, dy + (dh - fs) / 2, fs);
 }
 
