@@ -76,6 +76,24 @@ function canUseWebGL2() {
   } catch (e) { return false; }
 }
 
+// ============================================================
+//  深色模式：地图底图自动跟随系统（prefers-color-scheme）
+// ============================================================
+function applyMapTheme() {
+  if (!map || !map.setMapStyle) return;
+  const dark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+  map.setMapStyle(dark ? "amap://styles/dark" : "amap://styles/normal");
+}
+
+// 监听系统深浅色切换，实时更新地图底图
+function setupThemeListener() {
+  const mq = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)");
+  if (!mq) return;
+  const onChange = () => applyMapTheme();
+  if (mq.addEventListener) mq.addEventListener("change", onChange);
+  else if (mq.addListener) mq.addListener(onChange);  // 旧浏览器兼容
+}
+
 function initMap() {
   const key = CONFIG.amapKey;
   if (!key || key.startsWith("YOUR")) return;
@@ -86,6 +104,8 @@ function initMap() {
     const ph = document.querySelector("#map p");
     if (ph) ph.remove();
     map = new AMap.Map("map", { zoom: 16, center: [116.397428, 39.90923], rotateEnable: true });
+    applyMapTheme();          // 首次按系统主题设置地图深色/浅色样式
+    setupThemeListener();     // 系统主题变化时实时切换
     // 手动旋转（鼠标右键/双指）也会改变地图方向：监听旋转事件，同步权威值并刷新指针，
     // 保证指针真实方向始终与地图方向固定一致
     const onMapRotated = () => { syncMapRotFromMap(); refreshAllArrows(); };
