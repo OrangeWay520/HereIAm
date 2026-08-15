@@ -418,6 +418,7 @@ function onLocateClick() {
         if (map.setTilt) map.setTilt(0);
         map.setZoomAndCenter(17, target);
       }
+      refreshAllArrows(); // 进入方向跟随立即刷新箭头：目标指针 = heading + rotation = 0（朝上）
     }
   } else {
     // 总览正北：缩小显示全部 + 地图调回正北（不改变 followTarget，让用户选择框保持选中状态）
@@ -447,6 +448,7 @@ function updateDirectionFollow() {
   if (h == null) return;
   const rot = (360 - h) % 360;
   if (map.setRotation) map.setRotation(rot);
+  refreshAllArrows(); // 旋转后立即刷新箭头：方向跟随下目标指针 = heading + rotation = 0（朝上）
 }
 
 // 方向跟随持续循环：每 100ms 同步一次地图旋转（仅 followDirection=true 时生效）
@@ -462,6 +464,7 @@ function setCameraNorth(zoom, center) {
     if (map.setTilt) map.setTilt(0);
     map.setZoomAndCenter(zoom, center);
   }
+  refreshAllArrows(); // 复位正北后刷新箭头（rotation 归零）
 }
 
 // 总览：把所有位置点纳入视野（自己 + 对端好友），并保证恢复正北（同安卓 App）
@@ -501,6 +504,7 @@ function resetMapNorth() {
     if (map.setTilt) map.setTilt(0);
     map.setZoomAndCenter(map.getZoom(), map.getCenter());
   }
+  refreshAllArrows(); // 复位正北后刷新箭头（rotation 归零）
 }
 
 // 分享者：数据通道打开后立即上报当前定位（后续由 myWatch 实时驱动）
@@ -691,7 +695,7 @@ function createDriverMarker(pos, heading) {
     '<svg width="' + M_SVG_W + '" height="' + M_SVG_H + '" viewBox="0 0 ' + M_SVG_W + " " + M_SVG_H + '" style="position:absolute;inset:0;">' +
     '<defs><filter id="glowF" x="-80%" y="-80%" width="260%" height="260%">' +
     '<feGaussianBlur stdDeviation="' + (2.2 * M_SCALE).toFixed(2) + '"/></filter></defs>' +
-    '<g id="arrowG" transform="rotate(' + (heading || 0) + " " + M_CX + " " + M_CY + ')">' +
+    '<g id="arrowG" transform="rotate(' + (markerArrowAngle(heading) || 0) + " " + M_CX + " " + M_CY + ')">' +
     '<path id="glowPath" d="' + buildWaterdropPathD(M_R_WHITE) + '" fill="none" stroke="rgba(47,134,246,0.28)" stroke-width="' + (5 * M_SCALE).toFixed(2) + '" stroke-linejoin="round" filter="url(#glowF)"/>' +
     '<path d="' + buildWaterdropPathD(M_R_WHITE) + '" fill="#ffffff"/>' +
     '<path id="ptrPath" d="' + buildPointerPathD() + '" fill="rgba(47,134,246,0.96)"/>' +
@@ -899,10 +903,28 @@ function buildPointerPathD() {
     " Z";
 }
 
+// 定位标指针角度：heading + 地图顺时针旋转角 getRotation()。
+// marker 是屏幕方向的 HTML 覆盖物，不随地图旋转；地图旋转 r 度后真实朝向在屏幕上偏转 r 度，
+// 因此指针要加回 r 才始终指向真实朝向（方向跟随里 rotation=(360-heading)，指针=heading+360-heading=0=朝上）
+function markerArrowAngle(heading) {
+  if (heading == null) return null;
+  const rot = (map && typeof map.getRotation === "function") ? (map.getRotation() || 0) : 0;
+  return (((heading + rot) % 360) + 360) % 360;
+}
+
 function updateArrowG(g, heading) {
-  if (g && heading != null) {
-    g.setAttribute("transform", "rotate(" + heading + " " + M_CX + " " + M_CY + ")");
+  const a = markerArrowAngle(heading);
+  if (g && a != null) {
+    g.setAttribute("transform", "rotate(" + a + " " + M_CX + " " + M_CY + ")");
   }
+}
+
+// 地图旋转角度变化后立即刷新所有定位标箭头。
+// marker 是屏幕方向的 HTML 覆盖物，不随地图旋转；指针角度必须 = heading + 地图顺时针旋转角
+// 才能始终指向真实朝向（同安卓端 correctedPointerAngle：方向跟随下目标指针 = 0 = 朝上）。
+function refreshAllArrows() {
+  if (myPos && myPos.heading != null) updateArrowG(myArrowG, myPos.heading);
+  if (driverHeading != null) updateArrowG(driverArrowG, driverHeading);
 }
 
 // ============================================================
