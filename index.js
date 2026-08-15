@@ -250,6 +250,9 @@ async function onSignalShare(msg) {
     if (pc) { try { await pc.addIceCandidate(msg.candidate); } catch (e) {} }
   } else if (msg.type === "leave" || msg.type === "bye") {
     setShareStatus("好友已退出查看", false);
+    // 好友退出：立即移除其定位标（避免残留最后位置在地图上）并自动跳回自己
+    removeDriverMarker();
+    revertToMe();
   }
 }
 
