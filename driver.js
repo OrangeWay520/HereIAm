@@ -45,7 +45,7 @@ async function start() {
   $("start").disabled = true;
   setStatus("正在建立点对点连接…");
 
-  signaling = await connectSignaling("hereiam_" + code, onSignal);
+  signaling = await connectSignaling("hereiam:" + code, onSignal);
   setStatus("等待好友打开链接加入…");
   // 连接由好友的 "join" 信号触发建立
 }

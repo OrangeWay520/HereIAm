@@ -6,7 +6,8 @@ const CONFIG = {
   // 1) 信令服务：Ably（免费档）。
   //    注册：https://ably.com/signup （免费账号，不用绑卡）
   //    创建 App 后，复制 App 的 API Key（形如 "xxxx.yyyy:zzzz"）
-  ablyKey: "gOCoqA.LyruUQ:-DhLNHnwAl0wndwzdTU57-7X3ksPA6M3Y_s8dwRMXvo",
+  //    使用受限 Key：仅 publish/subscribe 且只限 hereiam:* 命名空间频道（Root Key 已弃用）
+  ablyKey: "gOCoqA.YT3vdQ:DQjVnalT0-TPuvFI9uLjtiBEe7ziO9hjFyTmrdqqpuE",
 
   // 2) 高德 JS 地图 Key + 安全密钥（免费）。
   //    注册：https://lbs.amap.com （个人开发者实名即可）

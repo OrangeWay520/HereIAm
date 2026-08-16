@@ -240,7 +240,7 @@ async function initShare(code) {
   $("stopBtn").style.display = "block";
 
   try {
-    signaling = await connectSignaling("hereiam_" + code, onSignalShare);
+    signaling = await connectSignaling("hereiam:" + code, onSignalShare);
     setShareStatus("等待好友打开链接加入…", false);
     setIndicator(true);
   } catch (e) {
@@ -672,7 +672,7 @@ async function joinView() {
   setViewStatus("正在连接…", false);
 
   try {
-    signaling = await connectSignaling("hereiam_" + code, onSignalView);
+    signaling = await connectSignaling("hereiam:" + code, onSignalView);
     setViewStatus("等待好友分享…", false);
     signaling.send({ type: "join", id: friendId });
     startJoinTimer();

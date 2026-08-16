@@ -560,7 +560,7 @@ async function init() {
   });
   $("exitBtn").addEventListener("click", stopSharing);
 
-  signaling = await connectSignaling("hereiam_" + code, onSignal);
+  signaling = await connectSignaling("hereiam:" + code, onSignal);
   setStatus("等待好友分享…");
   // 通知分享者有好友加入，分享者据此建立 P2P 连接（携带本好友唯一 ID）
   // 分享者可能还没点"开始"（信令通道尚未建立），会收不到这次 join。
