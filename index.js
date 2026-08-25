@@ -22,6 +22,7 @@ let deviceHeading = null;       // 设备指南针朝向（真北，实时更新
 let lastCompassUpdate = 0;      // 指南针刷新节流
 let lastCompassSend = 0;        // 方向回传节流
 let myMarker = null, myArrowG = null, myHasCentered = false;
+let myAvatarImg = null;   // 自己定位标上的头像元素（同安卓端：头像覆盖在蓝色圆盘上）
 // 自己定位标颜色元素（灰/蓝切换用）
 let myGlow = null, myPtr = null, myDisc = null;
 // 自己定位信号状态：true=信号不佳（灰色定位标），false=已精确定位（蓝色）。
@@ -417,6 +418,7 @@ function updateMyMarker() {
     const created = createDriverMarker(pos, myPos.heading);
     myMarker = created.marker;
     myArrowG = created.arrowG;
+    myAvatarImg = created.avatarImg;
     myGlow = created.glowPath;
     myPtr = created.ptrPath;
     myDisc = created.discPath;
@@ -424,6 +426,7 @@ function updateMyMarker() {
     myStroke = created.strokeCircle;
     map.add(myMarker);
     setMyLocated(myGray);
+    applyMyAvatar();   // 自己的定位标显示头像（同安卓端），无头像则保持蓝圆盘
     // 首次定位成功后自动把地图焦点移到当前位置
     if (!myHasCentered) { myHasCentered = true; map.setCenter(pos); }
   } else {
@@ -949,6 +952,18 @@ function setMyLocated(gray) {
   if (myDisc) myDisc.setAttribute("fill", "rgba(" + rgb + ",0.96)");
 }
 
+// 应用自己的头像到自己的水滴定位标（同安卓端：头像覆盖在蓝色圆盘上）
+function applyMyAvatar() {
+  if (!myAvatarImg) return;
+  const avatarData = getUserAvatar();
+  if (avatarData) {
+    // 同时设置 href 与 xlink:href，兼容新旧浏览器
+    myAvatarImg.setAttribute("href", avatarData);
+    myAvatarImg.setAttributeNS("http://www.w3.org/1999/xlink", "xlink:href", avatarData);
+    myAvatarImg.style.display = "block";
+  }
+}
+
 // 应用分享者资料（用户名 + 头像）到定位标
 function applyDriverProfile() {
   if (driverNameEl && driverName) {
@@ -1257,8 +1272,11 @@ function sendMyProfile() {
     dc.send(JSON.stringify(msg));
   } catch (e) {}
 }
-// 用户中心修改资料后：重发 profile
-onUserProfileChanged = sendMyProfile;
+// 用户中心修改资料后：刷新自己的定位标头像 + 重发 profile 给对端
+onUserProfileChanged = function () {
+  applyMyAvatar();
+  sendMyProfile();
+};
 
 // 立即把当前自己的位置回传给对端（对称协议：一律发 WGS-84，接收端统一转 GCJ-02）
 function sendMyLocationNow() {
