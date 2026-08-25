@@ -13,6 +13,7 @@ let pc = null, dc = null, signaling = null;
 let shareCode = null;           // 分享口令
 let viewCode = null;            // 正在查看的口令（查看模式）
 let joinTimer = null;           // 查看者重发 join 定时器
+let voice = null;               // 语音对讲控制器（createVoiceController 创建）
 
 // 自己的位置（进入页面即自动定位，同 App 端）
 let myWatchId = null;           // 自己的定位 watch
@@ -58,7 +59,7 @@ let driverHeading = null;
 // 自动跟随去重：仅在位置真正变化时居中，避免指南针 80ms 刷新把地图反复拉回
 let lastFollowCenter = null;
 
-// ========== 水滴定位标常量（与 friend.js 一致，M_SCALE=8/15）==========
+// ========== 水滴定位标常量（同安卓端，M_SCALE=8/15）==========
 const M_SCALE = 8 / 15;
 const M_R = 22 * M_SCALE;
 const M_WHITE_BORDER = 3.5 * M_SCALE;
@@ -199,6 +200,9 @@ function stopShare() {
   // 注意：不清除 myWatchId —— 全局定位持续运行，地图继续显示自己的定位标
   // 先发 bye 通知所有对端「分享已结束」，对方才能停止重连并清除定位标
   if (signaling) { try { signaling.send({ type: "bye" }); } catch (e) {} }
+  // 关闭语音对讲（停麦克风、广播收声给对端）
+  if (voice) { try { voice.disable(); } catch (e) {} }
+  hideVoice(); // 隐藏语音按钮
   if (pc) { try { pc.close(); } catch (e) {} pc = null; }
   if (signaling) { try { signaling.close(); } catch (e) {} signaling = null; }
   shareCode = null;
@@ -223,9 +227,11 @@ function genCode() {
 }
 
 function shareLink(code) {
-  const here = location.href;
-  const friendUrl = here.replace(/index\.html.*$/, "friend.html");
-  return friendUrl + "?channel=" + code;
+  // 统一用 index.html 作为分享落地页（不再区分好友端/发起端）。
+  // 以当前 URL 去掉 query/hash 后指向同目录下的 index.html，再拼上 channel 参数。
+  const base = location.href.split("?")[0].split("#")[0]
+    .replace(/[^/]*$/, "");   // 去掉文件名，保留目录
+  return base + "index.html" + "?channel=" + code;
 }
 
 async function initShare(code) {
@@ -252,11 +258,16 @@ async function initShare(code) {
 function createConnection() {
   if (pc) { try { pc.close(); } catch (e) {} }
   pc = new RTCPeerConnection({ iceServers: CONFIG.stunServers });
+  // 接收好友的音频轨道（语音对讲）
+  if (voice) pc.ontrack = (e) => { try { voice.handleRemoteTrack(e); } catch (err) {} };
   dc = pc.createDataChannel("location");
   dc.onopen = () => {
     // 连接建立后把自己的资料（用户名+头像）推送给好友端
     sendMyProfile();
     startLocationStream();
+    // 新连接：重置语音状态并亮出对讲按钮
+    if (voice) { try { voice.reset(); } catch (e) {} }
+    showVoice();
   };
   // 双向共享：接收查看者（安卓 App）回传的位置/资料，在地图上显示（对称协议：收到 WGS-84，转 GCJ-02 显示）
   dc.onmessage = (ev) => {
@@ -264,6 +275,9 @@ function createConnection() {
     try { m = JSON.parse(ev.data); } catch (e) { return; }
     if (m && m.type === "profile") {
       setDriverProfile(m.name, m.avatar);
+    } else if (m && m.type === "voice") {
+      // 语音对讲控制消息（静音/说话中/关闭）
+      if (voice) { try { voice.handleControl(m); } catch (e) {} }
     } else if (m && m.lat !== undefined) {
       onLocation(m);
     }
@@ -280,9 +294,11 @@ function createConnection() {
       setShareStatus("已点对点直连，正在实时上报位置", true);
       setIndicator(true);
       $("stopBtn").style.display = "block";
+      showVoice(); // 点对点直连后才显示语音对讲入口
     } else if (s === "failed" || s === "disconnected") {
       setShareStatus("连接断开，等待好友重新加入…", false);
       setIndicator(false);
+      hideVoice();
     }
   };
 
@@ -299,12 +315,22 @@ async function onSignalShare(msg) {
     if (pc && pc.connectionState !== "failed" && pc.connectionState !== "closed") return;
     createConnection();
   } else if (msg.type === "answer") {
-    if (pc) { try { await pc.setRemoteDescription(msg.sdp); } catch (e) {} }
+    if (pc) {
+      try { await pc.setRemoteDescription(msg.sdp); } catch (e) {}
+    }
+  } else if (msg.type === "offer") {
+    // 连接已建立时收到的 offer = 好友发起的语音重协商 → 就地应答
+    if (pc && pc.connectionState === "connected" && pc.signalingState === "stable") {
+      await answerVoiceRenegotiation(voice, pc, signaling, msg.sdp, function (o) {
+        if (signaling) { try { signaling.send(o); } catch (e) {} }
+      });
+    }
   } else if (msg.type === "candidate") {
     if (pc) { try { await pc.addIceCandidate(msg.candidate); } catch (e) {} }
   } else if (msg.type === "leave" || msg.type === "bye") {
     setShareStatus("好友已退出查看", false);
     // 好友退出：立即移除其定位标（避免残留最后位置在地图上）并自动跳回自己
+    if (voice) { try { voice.reset(); } catch (e) {} }
     removeDriverMarker();
     revertToMe();
   }
@@ -342,7 +368,7 @@ function startMyLocation() {
         // 双向共享：数据通道打开时把自己的位置实时回传对方
         if (dc && dc.readyState === "open") {
           if (mode === "share") {
-            // 分享模式：发送 WGS-84，好友端(friend.js)统一转 GCJ-02；含 gray 字段
+            // 分享模式：发送 WGS-84，对方(查看端)统一转 GCJ-02；含 gray 字段
             dc.send(JSON.stringify(myPos));
           } else if (mode === "view") {
             // 查看模式：对称协议，发送 WGS-84，安卓端统一转 GCJ-02 后显示；含 gray 字段
@@ -687,6 +713,9 @@ function stopView() {
   mode = "idle";
   viewCode = null;
   if (joinTimer) { clearInterval(joinTimer); joinTimer = null; }
+  // 关闭语音对讲
+  if (voice) { try { voice.disable(); } catch (e) {} }
+  hideVoice();
   if (pc) { try { pc.close(); } catch (e) {} pc = null; dc = null; }
   if (signaling) { try { signaling.close(); } catch (e) {} signaling = null; }
   removeDriverMarker();
@@ -710,7 +739,18 @@ function startJoinTimer() {
 
 async function onSignalView(msg) {
   if (msg.type === "offer") {
-    await handleOffer(msg.sdp);
+    // 连接已建立且 stable 时收到的 offer = 对方发起的语音重协商 → 就地应答；
+    // 否则是全新的位置共享连接 offer → 走正常建连
+    if (pc && pc.connectionState === "connected" && pc.signalingState === "stable") {
+      await answerVoiceRenegotiation(voice, pc, signaling, msg.sdp, function (o) {
+        if (signaling) { try { signaling.send(o); } catch (e) {} }
+      });
+    } else {
+      await handleOffer(msg.sdp);
+    }
+  } else if (msg.type === "answer") {
+    // 我方发起语音重协商后，对方返回 answer → 应用远端描述
+    if (pc) { try { await pc.setRemoteDescription(msg.sdp); } catch (e) {} }
   } else if (msg.type === "candidate") {
     if (pc) { try { await pc.addIceCandidate(msg.candidate); } catch (e) {} }
   } else if (msg.type === "bye") {
@@ -719,6 +759,8 @@ async function onSignalView(msg) {
     mode = "idle";
     viewCode = null;
     if (joinTimer) { clearInterval(joinTimer); joinTimer = null; }
+    if (voice) { try { voice.reset(); } catch (e) {} }
+    hideVoice();
     if (pc) { try { pc.close(); } catch (e) {} pc = null; dc = null; }
     removeDriverMarker();
     // 对方结束共享 → 自动跳回自己并刷新选择器
@@ -749,6 +791,8 @@ function removeDriverMarker() {
 async function handleOffer(offer) {
   if (pc) { try { pc.close(); } catch (e) {} }
   pc = new RTCPeerConnection({ iceServers: CONFIG.stunServers });
+  // 接收分享者的音频轨道（语音对讲）
+  if (voice) pc.ontrack = (e) => { try { voice.handleRemoteTrack(e); } catch (err) {} };
   pc.onicecandidate = (e) => {
     if (e.candidate && signaling)
       signaling.send({ type: "candidate", candidate: e.candidate, id: friendId });
@@ -758,12 +802,18 @@ async function handleOffer(offer) {
     dc.onopen = () => {
       // 连接建立后把自己的资料（用户名+头像）推送给分享者（安卓端显示）
       sendMyProfile();
+      // 新连接：重置语音状态并亮出对讲按钮
+      if (voice) { try { voice.reset(); } catch (e) {} }
+      showVoice();
     };
     dc.onmessage = (ev) => {
       let m;
       try { m = JSON.parse(ev.data); } catch (e) { return; }
       if (m && m.type === "profile") {
         setDriverProfile(m.name, m.avatar);
+      } else if (m && m.type === "voice") {
+        // 语音对讲控制消息（静音/说话中/关闭）
+        if (voice) { try { voice.handleControl(m); } catch (e) {} }
       } else if (m && m.lat !== undefined) {
         onLocation(m);
       }
@@ -775,9 +825,11 @@ async function handleOffer(offer) {
     if (st === "connected") {
       setViewStatus("已点对点直连", true);
       setIndicator(true);
+      showVoice(); // 点对点直连后才显示语音对讲入口
     } else if (st === "disconnected" || st === "failed") {
       setViewStatus("连接中断，正在自动重连…", false);
       setIndicator(false);
+      hideVoice();
       startJoinTimer();
     }
   };
@@ -834,7 +886,7 @@ function showDriverAt(pos, heading, gray) {
 }
 
 // ============================================================
-//  水滴定位标（固定圆盘 + 旋转指针，与 friend.js 一致）
+//  水滴定位标（固定圆盘 + 旋转指针，同安卓端）
 // ============================================================
 function createDriverMarker(pos, heading) {
   const content = document.createElement("div");
@@ -1130,6 +1182,16 @@ function setIndicator(on) {
   $("indicator").className = "indicator" + (on ? " on" : "");
 }
 
+// 语音对讲按钮只在点对点连接建立后显示；断连/退出时隐藏
+function showVoice() {
+  const vb = $("voiceBtn");
+  if (vb) vb.classList.add("ready");
+}
+function hideVoice() {
+  const vb = $("voiceBtn");
+  if (vb) vb.classList.remove("ready");
+}
+
 // ========== 指南针（设备朝向）：让方向指针实时指向手机朝向 ==========
 // 关键：Android 用 deviceorientationabsolute 才能拿到「真北」绝对角度；
 // iOS 用 deviceorientation 的 webkitCompassHeading（已是真北方位角）。
@@ -1233,6 +1295,19 @@ function copyText(text) {
 // ============================================================
 //  事件绑定 + 初始化
 // ============================================================
+// 从分享链接自动进入查看模式：index.html?channel=口令
+// 检测到 channel 参数时，填入口令并自动加入直连（无需手动输入）。
+function autoJoinFromUrl() {
+  try {
+    const params = new URLSearchParams(location.search);
+    const code = params.get("channel");
+    if (code && /^\d{6}$/.test(code)) {
+      $("viewCode").value = code;
+      joinView();
+    }
+  } catch (e) { /* 忽略解析失败 */ }
+}
+
 function bindEvents() {
   $("hiaBtn").addEventListener("click", onHiaClick);
   $("overlay").addEventListener("click", hideAllPanels);
@@ -1265,6 +1340,10 @@ function bindEvents() {
   });
 }
 
+// 语音对讲：创建控制器并绑定 UI（点对点连接后才显示按钮）
+voice = createVoiceController(() => ({ pc: pc, dc: dc, signaling: signaling }));
+bindVoiceUI(voice);
+
 initMap();
 bindEvents();
 startMyLocation();   // 进入页面即自动定位，显示自己的定位标
@@ -1274,3 +1353,4 @@ bindUserCenterEvents();
 initUserSelector();  // 顶部用户选择器（同安卓 App）
 updateUserSelector();// 初始默认选中「我」
 initCompass();       // 指南针：静止时方向指针也转动
+autoJoinFromUrl();   // 分享链接自动进入查看模式（index.html?channel=口令）

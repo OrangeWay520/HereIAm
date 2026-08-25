@@ -1,0 +1,394 @@
+// ============================================================
+//  HereIAm · 语音对讲（内置对讲机）
+//  复用现有 WebRTC 点对点连接：把麦克风音频 addTrack 到同一 pc，
+//  音频 RTP 点对点直传（不经服务器 / Ably）；
+//  首次开麦时经 Ably 信令做一次 renegotiation。
+//  对讲控制状态（静音 / 按键 / 说话中）走已有数据通道 P2P。
+//  主页面共用：index.html（分享/查看二合一）。
+//
+//  页面接入步骤：
+//    1) const voice = createVoiceController(() => ({ pc, dc, signaling }));
+//    2) bindVoiceUI(voice);                         // 绑定对讲 UI
+//    3) 创建 pc 后设置：pc.ontrack = e => voice.handleRemoteTrack(e);
+//    4) dc.onmessage 里转发：if (m.type === "voice") voice.handleControl(m);
+//    5) 收到重协商 offer 时（连接已建立且 stable）：调用 answerVoice(…)。
+//    6) 退出/断连时：voice.reset()。
+// ============================================================
+
+function createVoiceController(getConn) {
+  var v = {
+    getConn: getConn,              // () => ({ pc, dc, signaling })
+    stream: null,                  // 本地麦克风流
+    enabled: false,                // 是否已开启语音
+    mode: "ptt",                   // "ptt" 按键说话 | "continuous" 免提持续
+    pttHeld: false,                // 按键说话：是否正按住
+    contOn: false,                 // 免提持续：麦克风是否"开口"
+    muted: false,                  // 本机静音
+    remoteTalking: false,          // 对方当前是否在说话
+    remoteMuted: false,            // 对方是否已静音
+    remoteAudio: null,             // 远端音频播放元素
+    sentSpeaking: null,            // 上次已上报的 speaking 状态
+    micError: null,                // 上次麦克风错误提示
+    renegotiating: false,          // 正在重协商，防止并发
+    onUi: null,                    // 状态变化回调（页面刷新 UI）
+    onRemote: null,                // 对方状态变化回调（页面刷新提示）
+  };
+
+  // ---------- 数据通道发送控制消息（P2P，不经服务器） ----------
+  v.send = function (obj) {
+    var s = v.getConn() || {};
+    if (s.dc && s.dc.readyState === "open") {
+      try { s.dc.send(JSON.stringify(mergeVoice(obj))); } catch (e) {}
+    }
+  };
+
+  // 组装控制消息（type 置顶，其余字段透传）
+  function mergeVoice(obj) {
+    var out = { type: "voice" };
+    for (var k in obj) if (Object.prototype.hasOwnProperty.call(obj, k)) out[k] = obj[k];
+    return out;
+  }
+
+  // ---------- 计算"我当前是否在发送语音" ----------
+  v.computeSpeaking = function () {
+    if (!v.enabled || v.muted) return false;
+    return v.mode === "ptt" ? v.pttHeld : v.contOn;
+  };
+
+  // 同步本地麦克风 track.enabled（不说话时静音，省流量）+ 上报对方"说话中"
+  v.syncSpeaking = function () {
+    var sp = v.computeSpeaking();
+    if (v.stream) {
+      for (var i = 0; i < v.stream.getAudioTracks().length; i++) {
+        v.stream.getAudioTracks()[i].enabled = sp;
+      }
+    }
+    if (sp !== v.sentSpeaking) {
+      v.sentSpeaking = sp;
+      v.send({ action: "speaking", v: sp });
+    }
+    if (v.onUi) v.onUi();
+  };
+
+  // ---------- 麦克风权限（必须由用户手势触发，https 环境） ----------
+  v.getMicStream = function () {
+    if (v.stream) return Promise.resolve(v.stream);
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      v.micError = "当前浏览器不支持麦克风";
+      return Promise.reject(new Error(v.micError));
+    }
+    var c = {
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    };
+    return navigator.mediaDevices.getUserMedia(c).then(function (stream) {
+      v.stream = stream;
+      v.micError = null;
+      return stream;
+    }, function (e) {
+      v.micError = (e && e.name === "NotAllowedError")
+        ? "麦克风权限被拒绝，请在浏览器地址栏允许后重试"
+        : "无法获取麦克风";
+      throw e;
+    });
+  };
+
+  // ---------- 开启一次 offer/answer 协商（经 Ably 信令） ----------
+  v.renegotiate = function (pc, signaling) {
+    v.renegotiating = true;
+    return pc.createOffer().then(function (offer) {
+      return pc.setLocalDescription(offer);
+    }).then(function () {
+      signaling.send({ type: "offer", sdp: pc.localDescription });
+    }).then(function () {
+      v.renegotiating = false;
+    }, function (e) {
+      v.renegotiating = false;
+      throw e;
+    });
+  };
+
+  // ---------- 开启语音：采集 → addTrack → 重协商 ----------
+  v.enable = function () {
+    var s = v.getConn() || {};
+    if (!s.pc || !s.signaling) return Promise.resolve();
+    return v.getMicStream().then(function (stream) {
+      var tracks = stream.getAudioTracks();
+      for (var i = 0; i < tracks.length; i++) {
+        var added = false;
+        if (s.pc.getSenders) {
+          var sns = s.pc.getSenders();
+          for (var j = 0; j < sns.length; j++) {
+            if (sns[j].track === tracks[i]) { added = true; break; }
+          }
+        }
+        if (!added) s.pc.addTrack(tracks[i], stream);
+      }
+      // 防止 negotiateSoon(relay 的网络事件)与手动 createOffer 并发
+      if (s.pc._voiceAddBusy) return;
+      s.pc._voiceAddBusy = true;
+      v.enabled = true;
+      v.contOn = v.mode === "continuous";   // 免提模式：开启即说话
+      v.syncSpeaking();
+      return v.renegotiate(s.pc, s.signaling).then(function () {
+        s.pc._voiceAddBusy = false;
+        if (v.onUi) v.onUi();
+      });
+    }, function (e) {
+      v.enabled = false;
+      if (v.onUi) v.onUi();
+      throw e;
+    });
+  };
+
+  // ---------- 关闭语音：停麦克风 + 移除轨道 + 重协商 ----------
+  v.disable = function () {
+    var s = v.getConn() || {};
+    v.enabled = false;
+    v.pttHeld = false;
+    v.contOn = false;
+    v.sentSpeaking = null;
+    v.send({ action: "bye" });
+    if (v.stream) {
+      var trs = v.stream.getAudioTracks();
+      for (var t = 0; t < trs.length; t++) trs[t].stop();
+      try { v.stream.getTracks().forEach(function (x) { v.stream.removeTrack(x); }); } catch (e) {}
+      v.stream = null;
+    }
+    if (s.pc) {
+      try {
+        s.pc.getSenders().forEach(function (snd) {
+          if (snd.track && snd.track.kind === "audio") s.pc.removeTrack(snd);
+        });
+      } catch (e) {}
+    }
+    var p;
+    if (s.pc && s.signaling && !v.renegotiating) {
+      p = v.renegotiate(s.pc, s.signaling).catch(function () {});
+    } else {
+      p = Promise.resolve();
+    }
+    return p.then(function () {
+      if (s.pc) s.pc._voiceAddBusy = false;
+      if (v.onUi) v.onUi();
+    });
+  };
+
+  // ---------- 按键说话：按住/松开 ----------
+  v.setPtt = function (held) {
+    v.pttHeld = !!held;
+    v.syncSpeaking();
+  };
+
+  // ---------- 免提持续：开/关 ----------
+  v.toggleContinuous = function () {
+    v.contOn = !v.contOn;
+    v.syncSpeaking();
+  };
+
+  // ---------- 本机静音/取消 ----------
+  v.toggleMute = function () {
+    v.muted = !v.muted;
+    if (v.muted) v.sentSpeaking = null;      // 静音后不再上报"说话中"
+    v.syncSpeaking();
+    v.send({ action: "mute", v: v.muted });
+    if (v.onUi) v.onUi();
+  };
+
+  // ---------- 切换模式（按键 <-> 免提） ----------
+  v.setMode = function (m) {
+    if (m !== "ptt" && m !== "continuous") return;
+    v.mode = m;
+    v.pttHeld = false;
+    v.contOn = m === "continuous";           // 切到免提=开始说话；切到按键=待命
+    v.syncSpeaking();
+    if (v.onUi) v.onUi();
+  };
+
+  // ---------- 接收对方控制消息 ----------
+  v.handleControl = function (m) {
+    if (!m) return;
+    if (m.action === "speaking") v.remoteTalking = !!m.v;
+    else if (m.action === "mute") v.remoteMuted = !!m.v;
+    else if (m.action === "bye") { v.remoteTalking = false; v.remoteMuted = false; }
+    if (v.onRemote) v.onRemote();
+  };
+
+  // ---------- 处理远端音频轨道（放到 pc.ontrack） ----------
+  v.handleRemoteTrack = function (event) {
+    if (!event || !event.track) return;
+    var stream = event.streams && event.streams[0];
+    if (!stream) stream = new MediaStream([event.track]);
+    if (!v.remoteAudio) {
+      v.remoteAudio = new Audio();
+      v.remoteAudio.autoplay = true;
+      v.remoteAudio.playsInline = true;
+      v.remoteAudio.style.display = "none";
+      document.body.appendChild(v.remoteAudio);
+    }
+    v.remoteAudio.srcObject = stream;
+    v.remoteAudio.volume = 1;
+    v.remoteAudio.play().catch(function () {});
+    if (v.onRemote) v.onRemote();
+  };
+
+  // ---------- 远端音频不可用/断连时清理 ----------
+  v.stopRemoteAudio = function () {
+    if (v.remoteAudio) {
+      try { v.remoteAudio.pause(); v.remoteAudio.srcObject = null; } catch (e) {}
+    }
+    v.remoteTalking = false;
+    v.remoteMuted = false;
+    if (v.onRemote) v.onRemote();
+  };
+
+  // ---------- 退出/断连整体回收 ----------
+  v.reset = function () {
+    v.stopRemoteAudio();
+    if (v.stream) {
+      var trs = v.stream.getAudioTracks();
+      for (var i = 0; i < trs.length; i++) trs[i].stop();
+      try { v.stream.getTracks().forEach(function (x) { v.stream.removeTrack(x); }); } catch (e) {}
+      v.stream = null;
+    }
+    v.enabled = false;
+    v.pttHeld = false;
+    v.contOn = false;
+    v.muted = false;
+    v.remoteTalking = false;
+    v.remoteMuted = false;
+    v.sentSpeaking = null;
+    if (v.onUi) v.onUi();
+    if (v.onRemote) v.onRemote();
+  };
+
+  return v;
+}
+
+// ============================================================
+//  语音重协商应答
+//  连接已建立且处于 stable 时，直接在同一 pc 上应答新的 offer
+//  （语音重协商）。否则返回 false，由调用方走原有"新建连接"逻辑。
+//  send 由调用方提供（保持各页信令一致）。
+// ============================================================
+function answerVoiceRenegotiation(voice, pc, signaling, sdp, send) {
+  if (pc && pc.connectionState === "connected" && pc.signalingState === "stable") {
+    return pc.setRemoteDescription(sdp).then(function () {
+      return pc.createAnswer();
+    }).then(function (answer) {
+      return pc.setLocalDescription(answer);
+    }).then(function () {
+      send({ type: "answer", sdp: pc.localDescription });
+      return true;
+    }).catch(function () { return false; });
+  }
+  return Promise.resolve(false);
+}
+
+// ============================================================
+//  绑定页面对讲 UI
+//  依赖页面元素：voiceBtn / voiceTip / voicePanel / vStatus /
+//  vClose / voiceSeg / vCont / vMute / vRemote / vDisable
+// ============================================================
+function bindVoiceUI(v) {
+  var btn = document.getElementById("voiceBtn");
+  var tip = document.getElementById("voiceTip");
+  var panel = document.getElementById("voicePanel");
+  var status = document.getElementById("vStatus");
+  var seg = document.getElementById("voiceSeg");
+  var cont = document.getElementById("vCont");
+  var mute = document.getElementById("vMute");
+  var remote = document.getElementById("vRemote");
+  var close = document.getElementById("vClose");
+  var disable = document.getElementById("vDisable");
+  if (!btn || !panel) return;
+
+  panel._open = false;
+
+  function render() {
+    var talking = v.computeSpeaking();
+    // 圆钮高亮：已开启且正在出声 → 绿色；开启待命 → 品牌紫
+    btn.classList.toggle("hold", talking);
+    btn.classList.toggle("on", v.enabled && !talking);
+    // 状态胶囊
+    if (!v.enabled) status.textContent = v.micError ? "麦克风不可用" : "语音关闭";
+    else if (v.muted) status.textContent = "已静音";
+    else if (talking) status.textContent = "说话中";
+    else status.textContent = "待命";
+    // 模式
+    if (seg) seg.querySelectorAll("[data-md]").forEach(function (b) {
+      b.classList.toggle("on", b.getAttribute("data-md") === v.mode);
+    });
+    // 免提持续开关（仅免提模式显示）
+    if (cont) {
+      cont.classList.toggle("on", v.contOn);
+      cont.style.display = v.mode === "continuous" ? "" : "none";
+    }
+    // 静音
+    if (mute) mute.classList.toggle("on", v.muted);
+    panel.classList.toggle("show", !!panel._open);
+  }
+
+  function renderRemote() {
+    if (tip) {
+      if (v.remoteMuted) { tip.textContent = "对方已静音"; tip.classList.add("show"); }
+      else if (v.remoteTalking) { tip.textContent = "对方 · 说话中"; tip.classList.add("show"); }
+      else tip.classList.remove("show");
+    }
+    if (remote) {
+      remote.textContent = v.remoteMuted ? "对方已静音"
+        : v.remoteTalking ? "对方 · 说话中" : "对方 · 未说话";
+    }
+    render();
+  }
+
+  v.onUi = render;
+  v.onRemote = renderRemote;
+
+  function openPanel(open) {
+    panel._open = open !== undefined ? !!open : !panel._open;
+    render();
+  }
+
+  // 长按 = 按键说话；松开即停
+  var holding = false;
+  btn.addEventListener("pointerdown", function (e) {
+    if (v.enabled && v.mode === "ptt") {
+      if (e.preventDefault) e.preventDefault();
+      holding = true;
+      v.setPtt(true);
+    }
+  });
+  var release = function () { if (holding) { holding = false; v.setPtt(false); } };
+  btn.addEventListener("pointerup", release);
+  btn.addEventListener("pointerleave", release);
+  btn.addEventListener("pointercancel", release);
+
+  // 单击：未开启 → 开启并展开设置；已开启 → 展开/收起设置
+  btn.addEventListener("click", function () {
+    if (!v.enabled) {
+      v.enable().then(function () { openPanel(true); }).catch(function () { render(); });
+      return;
+    }
+    openPanel();
+  });
+
+  // 模式切换
+  if (seg) seg.addEventListener("click", function (e) {
+    var b = e.target.closest("[data-md]");
+    if (!b) return;
+    v.setMode(b.getAttribute("data-md"));
+  });
+  // 免提持续开关
+  if (cont) cont.addEventListener("click", function () { v.toggleContinuous(); });
+  // 静音开关
+  if (mute) mute.addEventListener("click", function () { v.toggleMute(); });
+  // 关闭浮层
+  if (close) close.addEventListener("click", function () { openPanel(false); });
+  // 关闭语音
+  if (disable) disable.addEventListener("click", function () {
+    v.disable().then(function () { openPanel(false); });
+  });
+
+  render();
+  renderRemote();
+}

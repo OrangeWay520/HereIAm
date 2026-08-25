@@ -257,6 +257,54 @@
     .crop-corner.bl { left: -4px; bottom: -4px; border-bottom: 4px solid #fff; border-left: 4px solid #fff; border-bottom-left-radius: 8px; }
     .crop-corner.br { right: -4px; bottom: -4px; border-bottom: 4px solid #fff; border-right: 4px solid #fff; border-bottom-right-radius: 8px; }
     .crop-tip { font-size: 11px; color: var(--text-muted); text-align: center; margin-top: 8px; }
+  /* ========== 语音对讲（内置对讲机） ========== */
+    .voice-btn {
+      position: absolute; right: 16px; bottom: 68px; z-index: 11;
+      width: 44px; height: 44px; border-radius: 50%; border: none; cursor: pointer;
+      background: var(--card); box-shadow: 0 2px 8px rgba(0,0,0,.2);
+      display: none; align-items: center; justify-content: center;
+    }
+    .voice-btn.ready { display: flex; }
+    .voice-btn svg { width: 22px; height: 22px; fill: #4b3fe3; }
+    .voice-btn.on { background: #4b3fe3; }
+    .voice-btn.on svg { fill: #fff; }
+    .voice-btn.hold { background: #16a34a; }
+    .voice-btn.hold svg { fill: #fff; }
+    .voice-btn:active { transform: scale(.95); }
+    .voice-tip {
+      position: absolute; right: 16px; bottom: 118px; z-index: 12; display: none;
+      background: rgba(26,26,46,.8); color: #fff; font-size: 12px; line-height: 18px;
+      padding: 4px 10px; border-radius: 999px; white-space: nowrap; pointer-events: none;
+    }
+    .voice-tip.show { display: block; }
+    .voice-panel {
+      position: absolute; right: 16px; bottom: 132px; z-index: 15; display: none;
+      width: 250px; flex-direction: column; gap: 12px; padding: 16px;
+      background: var(--card); border: 1px solid var(--border); border-radius: 16px;
+      box-shadow: 0 6px 24px rgba(0,0,0,.22);
+    }
+    .voice-panel.show { display: flex; }
+    .vp-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .vp-title { font-size: 15px; font-weight: 700; }
+    .vp-status { font-size: 12px; color: #4b3fe3; background: rgba(75,63,227,.12);
+      padding: 3px 10px; border-radius: 999px; white-space: nowrap; }
+    .vp-close { font-size: 18px; line-height: 1; color: var(--text-muted); cursor: pointer;
+      background: none; border: none; padding: 0 2px; }
+    .vp-seg { display: flex; gap: 6px; background: var(--bg); border-radius: 10px; padding: 4px; }
+    .vp-seg button { flex: 1; font-size: 12px; color: var(--text-muted); background: transparent;
+      border: 1px solid transparent; border-radius: 8px; padding: 7px 0; cursor: pointer; }
+    .vp-seg button.on { color: #4b3fe3; background: var(--card); border-color: var(--border); font-weight: 600; }
+    .vp-row { display: flex; align-items: center; justify-content: space-between; font-size: 13px; gap: 8px; }
+    .vp-switch { width: 40px; height: 23px; border-radius: 999px; background: var(--bg);
+      border: 1px solid var(--border); position: relative; cursor: pointer; flex-shrink: 0; }
+    .vp-switch i { position: absolute; top: 2px; left: 2px; width: 17px; height: 17px; border-radius: 50%;
+      background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.2); transition: left .12s; }
+    .vp-switch.on { background: #4b3fe3; border-color: #4b3fe3; }
+    .vp-switch.on i { left: 19px; }
+    .vp-remote { font-size: 12px; color: var(--text-muted); }
+    .vp-disable { width: 100%; border: none; border-radius: 10px; padding: 9px 0; cursor: pointer;
+      background: rgba(244,63,94,.14); color: #f43f5e; font-size: 13px; font-weight: 600; }
+
   </style>
 </head>
 <body>
@@ -288,6 +336,36 @@
       <line x1="19" y1="12" x2="22.5" y2="12"/>
     </svg>
   </button>
+
+  <!-- 语音对讲按钮（点对点连接后才显示） -->
+  <button class="voice-btn" id="voiceBtn" title="语音对讲" aria-label="语音对讲">
+    <svg viewBox="0 0 24 24"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-2.08A7 7 0 0 0 19 12h-2z"/></svg>
+  </button>
+  <!-- 对方说话中气泡 -->
+  <div class="voice-tip" id="voiceTip"></div>
+
+  <!-- 对讲设置浮层 -->
+  <div class="voice-panel" id="voicePanel">
+    <div class="vp-head">
+      <span class="vp-title">对讲机</span>
+      <span class="vp-status" id="vStatus">语音关闭</span>
+      <button class="vp-close" id="vClose" aria-label="关闭">✕</button>
+    </div>
+    <div class="vp-seg" id="voiceSeg">
+      <button data-md="ptt" class="on">按键说话</button>
+      <button data-md="continuous">免提持续</button>
+    </div>
+    <div class="vp-row" id="vCont">
+      <span>免提持续</span>
+      <div class="vp-switch"><i></i></div>
+    </div>
+    <div class="vp-row">
+      <span>本机静音</span>
+      <div class="vp-switch" id="vMute"><i></i></div>
+    </div>
+    <div class="vp-remote" id="vRemote">对方 · 未说话</div>
+    <button class="vp-disable" id="vDisable">关闭语音</button>
+  </div>
 
   <!-- 顶部用户选择器（同安卓 App）：选择「我」/「对端好友」使其位置保持居中 -->
   <div class="user-selector" id="userSelector" title="选择要居中跟随的人">
@@ -416,8 +494,9 @@
 
   <script src="https://cdn.ably.com/lib/ably.min-1.2.41.js"></script>
   <script src="config.js?v=20260816a"></script>
-  <script src="signaling.js?v=20260816a"></script>
+  <script src="signaling.js?v=20260816b"></script>
   <script src="user.js?v=20260816a"></script>
+  <script src="voice.js?v=20260816b"></script>
   <script src="index.js?v=20260816a"></script>
 </body>
 </html>

@@ -12,6 +12,10 @@ function connectSignaling(channelName, onMessage) {
     ably.connection.once("connected", () => {
       const channel = ably.channels.get(channelName);
       channel.subscribe((msg) => {
+        // Ably 会把本连接自己发布的消息也回环投递，
+        // 若不排除会导致语音重协商等场景把"自己发的 offer"误当成对端消息、
+        // 触发重建连接。这里按 connectionId 过滤掉自己的消息。
+        if (msg.connectionId && msg.connectionId === ably.connection.id) return;
         try {
           onMessage(JSON.parse(msg.data));
         } catch (e) {

@@ -33,11 +33,12 @@ async function init() {
   $("start").onclick = start;
 }
 
-// 生成好友打开的链接。本地调试用相对路径；正式托管时改成你的线上地址。
+// 生成好友打开的链接。统一用 index.html 作为好友查看落地页（不再区分好友端/发起端）。
+// 以当前 URL 去掉 query 后指向同目录下的 index.html，再拼上 channel 参数。
 function shareLink(code) {
-  const here = location.href;
-  const friendUrl = here.replace(/driver\.html.*$/, "friend.html");
-  return friendUrl + "?channel=" + code;
+  const base = location.href.split("?")[0].split("#")[0]
+    .replace(/[^/]*$/, "");   // 去掉文件名，保留目录
+  return base + "index.html" + "?channel=" + code;
 }
 
 async function start() {
