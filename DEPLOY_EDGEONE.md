@@ -49,18 +49,13 @@
 
 ### 方式 A：Git 集成（推荐，自动部署，符合"少手动"习惯）
 
-1. 把 `web/` 目录初始化为独立 Git 仓库并推送到 **Gitee**（国内可达、你有账号）：
-   ```bash
-   cd f:/Software-Development/HereIAm/web
-   git init -b main
-   git add -A
-   git commit -m "HereIAm web v1.0"
-   git remote add origin https://gitee.com/<你的用户名>/HereIAm-Web.git
-   git push -u origin main
-   ```
-   > 仓库里应包含：`index.html`、`driver.html`、
-   > `index.js`、`driver.js`、`signaling.js`、`user.js`、`config.js`
-   > 以及 `favicon.png`、`hereiam_logo.png`、`bar_logo1.png`、`apple-touch-icon.png` 等图片。
+> ✅ 源仓库已就绪：本仓库已添加远程 `edgeone` → `https://gitee.com/orange-way/HereIAm-Web.git`
+> 且已推送 `main` 分支。后续每次更新网页，只需把改动 push 到 GitHub `origin` 后，再执行：
+> ```bash
+> git push edgeone main:main
+> ```
+
+1. 本次更新已推送到 **Gitee**：`https://gitee.com/orange-way/HereIAm-Web`（国内可达），分支 `main`。
 2. EdgeOne Pages 控制台 → **创建 Pages 项目** → 选「从 Git 仓库导入」→ 授权 Gitee。
 3. 选择 `HereIAm-Web` 仓库与分支 `main`。
 4. 因为**没有构建命令**：在「构建配置」里把构建命令留空或填 `echo "no build"`，**输出目录填 `.`**（根目录）。
