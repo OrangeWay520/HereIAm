@@ -158,18 +158,18 @@ function onHiaClick() {
                   $("sharePanel").style.display !== "none" ||
                   $("viewPanel").style.display !== "none";
   if (anyOpen) { hideAllPanels(); return; }
-  showOverlay();
   if (mode === "share") {
-    // 正在共享 → 直接弹出「分享我的位置」窗口
+    // 正在共享 → 直接弹出「分享我的位置」窗口（不加遮罩，保持地图可见可用）
     $("sharePanel").style.display = "block";
     return;
   }
   if (mode === "view") {
-    // 正在查看他人 → 直接弹出「查看他人位置」窗口（显示正在查看状态）
+    // 正在查看他人 → 直接弹出「查看他人位置」窗口（显示正在查看状态，不加遮罩）
     showViewPanel(true);
     return;
   }
-  // 空闲 → 弹出选择面板
+  // 空闲 → 弹出选择面板，配遮罩
+  showOverlay();
   $("sheet").style.display = "block";
 }
 
@@ -183,6 +183,7 @@ function showViewPanel(isViewing) {
 function startShare() {
   $("sheet").style.display = "none";
   $("sharePanel").style.display = "block";
+  hideOverlay(); // 进入共享后不再用遮罩压住地图与 HIA 键
   if (!shareCode) {
     shareCode = genCode();
     initShare(shareCode);
@@ -192,6 +193,7 @@ function startShare() {
 
 function startView() {
   $("sheet").style.display = "none";
+  hideOverlay(); // 进入查看后同样不压遮罩
   showViewPanel(false);
   $("viewPanel").style.display = "block";
 }
@@ -285,7 +287,7 @@ function createConnection() {
 
   pc.onicecandidate = (e) => {
     if (e.candidate && signaling)
-      signaling.send({ type: "candidate", candidate: e.candidate });
+      signaling.send({ type: "candidate", candidate: e.candidate, id: friendId });
   };
   pc.onconnectionstatechange = () => {
     if (!pc) return;
@@ -305,7 +307,7 @@ function createConnection() {
   (async () => {
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
-    if (signaling) signaling.send({ type: "offer", sdp: offer });
+    if (signaling) signaling.send({ type: "offer", sdp: offer, id: friendId });
   })();
 }
 
@@ -322,6 +324,7 @@ async function onSignalShare(msg) {
     // 连接已建立时收到的 offer = 好友发起的语音重协商 → 就地应答
     if (pc && pc.connectionState === "connected" && pc.signalingState === "stable") {
       await answerVoiceRenegotiation(voice, pc, signaling, msg.sdp, function (o) {
+        if (o) o.id = friendId; // 应答须带本端 friendId，安卓端认得出路由
         if (signaling) { try { signaling.send(o); } catch (e) {} }
       });
     }
@@ -356,6 +359,7 @@ function startMyLocation() {
           ? Math.round(deviceHeading)
           : (pos.coords.heading != null ? Math.round(pos.coords.heading) : null);
         myPos = {
+          type: "loc",   // 携带类型，安卓端/好友端统一按 type=="loc" 解析
           lat: pos.coords.latitude,
           lng: pos.coords.longitude,
           heading: heading,
@@ -366,19 +370,9 @@ function startMyLocation() {
         // 地图上更新自己的水滴定位标
         updateMyMarker();
         // 双向共享：数据通道打开时把自己的位置实时回传对方
+        // （对称协议：一律携带 type:"loc"，发送 WGS-84，接收端统一转 GCJ-02；含 gray 字段）
         if (dc && dc.readyState === "open") {
-          if (mode === "share") {
-            // 分享模式：发送 WGS-84，对方(查看端)统一转 GCJ-02；含 gray 字段
-            dc.send(JSON.stringify(myPos));
-          } else if (mode === "view") {
-            // 查看模式：对称协议，发送 WGS-84，安卓端统一转 GCJ-02 后显示；含 gray 字段
-            dc.send(JSON.stringify({
-              type: "loc",
-              lat: myPos.lat, lng: myPos.lng,
-              heading: myPos.heading, acc: myPos.acc, t: Date.now(),
-              gray: myPos.gray,
-            }));
-          }
+          dc.send(JSON.stringify(myPos));
         }
       },
       (err) => {
@@ -743,6 +737,7 @@ async function onSignalView(msg) {
     // 否则是全新的位置共享连接 offer → 走正常建连
     if (pc && pc.connectionState === "connected" && pc.signalingState === "stable") {
       await answerVoiceRenegotiation(voice, pc, signaling, msg.sdp, function (o) {
+        if (o) o.id = friendId; // 应答须带本端 friendId，安卓端认得出路由
         if (signaling) { try { signaling.send(o); } catch (e) {} }
       });
     } else {
@@ -1342,6 +1337,7 @@ function bindEvents() {
 
 // 语音对讲：创建控制器并绑定 UI（点对点连接后才显示按钮）
 voice = createVoiceController(() => ({ pc: pc, dc: dc, signaling: signaling }));
+voice.friendId = friendId; // 语音重协商 offer 须携带本端 friendId，安卓端才认得出并正确路由
 bindVoiceUI(voice);
 
 initMap();

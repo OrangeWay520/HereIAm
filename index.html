@@ -82,7 +82,7 @@
       position: absolute; bottom: 28px; left: 50%; transform: translateX(-50%);
       width: 64px; height: 64px; border-radius: 50%; border: none; cursor: pointer;
       background: var(--card); box-shadow: 0 2px 10px rgba(0,0,0,.25);
-      z-index: 10; overflow: hidden; padding: 0;
+      z-index: 25; overflow: hidden; padding: 0;
     }
     .hia-btn img { width: 100%; height: 100%; object-fit: cover; }
     .hia-btn:active { transform: translateX(-50%) scale(.95); }
@@ -266,8 +266,7 @@
     }
     .voice-btn.ready { display: flex; }
     .voice-btn svg { width: 22px; height: 22px; fill: #4b3fe3; }
-    .voice-btn.on { background: #4b3fe3; }
-    .voice-btn.on svg { fill: #fff; }
+    /* 与安卓一致：待命（含已开启但未说话）= 深浅自适应底 + 品牌紫图标；仅说话时变绿 */
     .voice-btn.hold { background: #16a34a; }
     .voice-btn.hold svg { fill: #fff; }
     .voice-btn:active { transform: scale(.95); }

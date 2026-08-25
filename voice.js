@@ -98,7 +98,10 @@ function createVoiceController(getConn) {
     return pc.createOffer().then(function (offer) {
       return pc.setLocalDescription(offer);
     }).then(function () {
-      signaling.send({ type: "offer", sdp: pc.localDescription });
+      // 必须携带 id(=friendId)，安卓端才认得出该 offer 来自哪位好友并正确路由
+      var msg = { type: "offer", sdp: pc.localDescription };
+      if (v.friendId) msg.id = v.friendId;
+      signaling.send(msg);
     }).then(function () {
       v.renegotiating = false;
     }, function (e) {
@@ -241,6 +244,15 @@ function createVoiceController(getConn) {
     if (v.onRemote) v.onRemote();
   };
 
+  // ---------- 在用户手势里激活远端音频 ----------
+  // 浏览器会拦截非用户手势的自动播放（带声音）——拿到麦克风/点按对讲键本身也是用户手势，
+  // 这里顺带 resume 远端音频，保证"听到对方声音"不再被自动播放策略拦下。
+  v.resumePlayback = function () {
+    if (v.remoteAudio) {
+      try { v.remoteAudio.play().catch(function () {}); } catch (e) {}
+    }
+  };
+
   // ---------- 退出/断连整体回收 ----------
   v.reset = function () {
     v.stopRemoteAudio();
@@ -306,9 +318,8 @@ function bindVoiceUI(v) {
 
   function render() {
     var talking = v.computeSpeaking();
-    // 圆钮高亮：已开启且正在出声 → 绿色；开启待命 → 品牌紫
+    // 与安卓一致：仅"说话中"变绿，其余（含开启待命）保持深浅自适应底 + 紫图标
     btn.classList.toggle("hold", talking);
-    btn.classList.toggle("on", v.enabled && !talking);
     // 状态胶囊
     if (!v.enabled) status.textContent = v.micError ? "麦克风不可用" : "语音关闭";
     else if (v.muted) status.textContent = "已静音";
@@ -352,6 +363,7 @@ function bindVoiceUI(v) {
   // 长按 = 按键说话；松开即停
   var holding = false;
   btn.addEventListener("pointerdown", function (e) {
+    v.resumePlayback();   // 用户手势：顺带激活远端音频播放（绕过自动播放拦截）
     if (v.enabled && v.mode === "ptt") {
       if (e.preventDefault) e.preventDefault();
       holding = true;
@@ -363,13 +375,15 @@ function bindVoiceUI(v) {
   btn.addEventListener("pointerleave", release);
   btn.addEventListener("pointercancel", release);
 
-  // 单击：未开启 → 开启并展开设置；已开启 → 展开/收起设置
+  // 单击：未开启 → 开启语音（默认按键模式）；已开启 → 切换 按键/免提持续 模式。
+  // 不再弹设置浮层，与手机端交互一致：长按=说话、单击=切换持续说话。
   btn.addEventListener("click", function () {
+    v.resumePlayback();   // 用户手势：顺带激活远端音频播放
     if (!v.enabled) {
-      v.enable().then(function () { openPanel(true); }).catch(function () { render(); });
+      v.enable().then(function () { render(); }).catch(function () { render(); });
       return;
     }
-    openPanel();
+    v.setMode(v.mode === "ptt" ? "continuous" : "ptt");
   });
 
   // 模式切换
