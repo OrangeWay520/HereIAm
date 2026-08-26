@@ -492,7 +492,6 @@ function handlePeerData(peerId, m) {
     if (p) { if (m.name) p.name = m.name; if (m.avatar) p.avatarData = m.avatar; }
     if (mode === "share") {
       setCoViewProfile(peerId, m.name, m.avatar);
-      relayPeerPacket(peerId, m);                     // host 兜底中继（幂等）
     } else if (hostId && peerId === hostId) {
       setDriverProfile(m.name, m.avatar);             // 分享者资料 → 主定位标
     } else {
@@ -500,15 +499,13 @@ function handlePeerData(peerId, m) {
     }
     updateUserSelector();
   } else if (m.type === "voice") {
-    // 对端语音控制消息（静音/说话中/关闭）：直达本端；host 顺带兜底中继给其他成员（幂等）
-    if (mode === "share") relayPeerPacket(peerId, m);
+    // 对端语音控制消息（静音/说话中/关闭）：直达本端
     if (voice) { try { voice.handleControl(m); } catch (e) {} }
   } else if (m.type === "leave" && m.friendId) {
     removeCoView(m.friendId);   // 历史数据通道 leave（现改走信令），幂等处理
   } else if (m.lat !== undefined) {
     if (mode === "share") {
       showCoView(peerId, m);                          // 成员位置直接显示给 host
-      relayPeerPacket(peerId, m);                     // host 兜底中继（mesh 直连下幂等）
       updateUserSelector();
     } else if (hostId && peerId === hostId) {
       onLocation(m);                                  // 分享者（host）位置 → 主定位标
@@ -516,18 +513,6 @@ function handlePeerData(peerId, m) {
       showCoView(peerId, m);
     }
   }
-}
-
-// host 兜底中继：把来自 fromId 成员的消息标记 friendId 后转发给其他已连接成员
-function relayPeerPacket(fromId, m) {
-  if (mode !== "share") return;
-  const copy = Object.assign({}, m);
-  copy.friendId = fromId;
-  const json = JSON.stringify(copy);
-  meshPeers.forEach((p, fid) => {
-    if (fid === fromId) return;
-    if (p.dc && p.dc.readyState === "open") { try { p.dc.send(json); } catch (e) {} }
-  });
 }
 
 // 根据当前是否有成员已直连，点亮/熄灭右上角指示灯（有人真正加入才亮，同安卓端）
