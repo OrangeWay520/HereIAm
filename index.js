@@ -44,8 +44,15 @@ let driverGlow = null, driverPtr = null, driverDisc = null;
 let driverWdp = null, driverStroke = null; // 分享者定位标
 let myWdp = null, myStroke = null;         // 自己定位标
 
-// 本好友会话唯一 ID（查看模式用）
-const friendId = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+// 本好友会话唯一 ID（查看模式用）。
+// 持久化到 sessionStorage：刷新页面后仍是同一 ID，分享端据此识别「同一个浏览器用户」，
+// 复用（替换）旧连接而不是另建一条，避免刷新重进后分享端出现重复的定位标。
+let friendId = null;
+try { friendId = sessionStorage.getItem("hereiam_client_id"); } catch (e) {}
+if (!friendId) {
+  friendId = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+  try { sessionStorage.setItem("hereiam_client_id", friendId); } catch (e) {}
+}
 
 // ========== 顶部用户选择器 / 定位按钮状态（同安卓 App） ==========
 // 当前跟随目标："me"=自己位置居中 / "friend"=对端好友位置居中 / null=不跟随
@@ -593,13 +600,7 @@ function onLocateClick() {
     // 聚焦正北：将选中的人居中放大 + 地图调回正北
     followDirection = false;
     overviewMode = false;
-    let target = null;
-    if (followTarget === "friend" && driverMarker) {
-      target = driverMarker.getPosition();
-    } else if (myPos) {
-      const [lng, lat] = wgs84ToGcj02(myPos.lng, myPos.lat);
-      target = new AMap.LngLat(lng, lat);
-    }
+    const target = getFollowPos();
     if (target) {
       setCameraNorth(17, target); // 同安卓 FOCUS_ZOOM=17
     }
@@ -608,13 +609,7 @@ function onLocateClick() {
     followDirection = true;
     overviewMode = false;
     directionFollowSince = Date.now(); // 短暂延迟后再接管旋转，避免打断居中动画
-    let target = null;
-    if (followTarget === "friend" && driverMarker) {
-      target = driverMarker.getPosition();
-    } else if (myPos) {
-      const [lng, lat] = wgs84ToGcj02(myPos.lng, myPos.lat);
-      target = new AMap.LngLat(lng, lat);
-    }
+    const target = getFollowPos();
     if (target) {
       const h = getDirectionHeading();
       const rot = h != null ? (360 - h) % 360 : 0;
@@ -641,6 +636,12 @@ function onLocateClick() {
 function getDirectionHeading() {
   if (followTarget === "friend" && driverMarker) {
     if (driverHeading != null) return driverHeading;
+    if (deviceHeading != null) return deviceHeading;
+    return null;
+  }
+  const cv = followCoview();
+  if (cv) {
+    if (cv.heading != null) return cv.heading;
     if (deviceHeading != null) return deviceHeading;
     return null;
   }
@@ -748,6 +749,7 @@ function fitAllPositions() {
   const mks = [];
   if (myMarker) mks.push(myMarker);
   if (driverMarker) mks.push(driverMarker);
+  coViews.forEach((cv) => { if (cv.marker) mks.push(cv.marker); });
   if (mks.length === 0) {
     locStep = 0; // 无任何位置，退回聚焦态
     setLocateIcon();
@@ -908,7 +910,8 @@ function showCoView(fid, m) {
   const [lng, lat] = wgs84ToGcj02(m.lng, m.lat);
   const pos = new AMap.LngLat(lng, lat);
   let cv = coViews.get(fid);
-  if (!cv) { cv = { name: null, avatarData: null, marker: null }; coViews.set(fid, cv); }
+  if (!cv) { cv = { name: null, avatarData: null, marker: null, heading: null }; coViews.set(fid, cv); }
+  if (m.heading != null) cv.heading = m.heading;
   if (!cv.marker) {
     const created = createDriverMarker(pos, m.heading != null ? m.heading : null);
     cv.marker = created.marker;
@@ -927,6 +930,16 @@ function showCoView(fid, m) {
     updateArrowG(cv.arrowG, m.heading != null ? m.heading : null);
   }
   setCoLocated(cv, !!m.gray);
+  // 跟随该协作者时自动居中（保留当前缩放；总览模式下暂停）
+  if (followCoviewId() === fid && !overviewMode) {
+    if (!lastFollowCenter ||
+        Math.abs(pos.lng - lastFollowCenter.lng) > 1e-7 ||
+        Math.abs(pos.lat - lastFollowCenter.lat) > 1e-7) {
+      lastFollowCenter = { lng: pos.lng, lat: pos.lat };
+      map.setCenter(pos);
+    }
+  }
+  updateUserSelector();
 }
 
 function setCoLocated(cv, gray) {
@@ -938,11 +951,16 @@ function setCoLocated(cv, gray) {
 
 // 接收某位房间内其他查看者的资料（名字/头像）
 function setCoViewProfile(fid, name, avatar) {
-  if (!coViews.has(fid)) { coViews.set(fid, { name: name || null, avatarData: avatar || null, marker: null }); return; }
+  if (!coViews.has(fid)) {
+    coViews.set(fid, { name: name || null, avatarData: avatar || null, marker: null, heading: null });
+    updateUserSelector();
+    return;
+  }
   const cv = coViews.get(fid);
   if (name) cv.name = name;
   if (avatar) cv.avatarData = avatar;
   applyCoProfile(cv);
+  updateUserSelector();
 }
 
 function applyCoProfile(cv) {
@@ -961,11 +979,14 @@ function removeCoView(fid) {
   if (!cv) { coViews.delete(fid); return; }
   if (cv.marker) { try { cv.marker.setMap(null); } catch (e) {} }
   coViews.delete(fid);
+  if (followCoviewId() === fid) revertToMe();   // 正跟随它 → 跳回自己
+  updateUserSelector();
 }
 
 function clearCoViews() {
   coViews.forEach((cv) => { if (cv.marker) { try { cv.marker.setMap(null); } catch (e) {} } });
   coViews.clear();
+  if (followCoviewId()) revertToMe();   // 正跟随某位协作者 → 跳回自己
 }
 
 async function handleOffer(offer) {
@@ -1227,19 +1248,56 @@ function initUserSelector() {
   });
 }
 
+// 当前是否在跟随某个协作者（房间内除共享者本人外的其他查看者），返回其 friendId，否则 null
+function followCoviewId() {
+  if (typeof followTarget === "string" && followTarget.indexOf("friend:") === 0) {
+    return followTarget.slice("friend:".length);
+  }
+  return null;
+}
+
+// 当前跟随的协作者对象（可能尚无定位标）
+function followCoview() {
+  const fid = followCoviewId();
+  return fid ? (coViews.get(fid) || null) : null;
+}
+
+// 当前选中目标（"我"/"好友"/协作者）的位置；未就绪时对协作者返回 null（不回落自己，同安卓端）
+function getFollowPos() {
+  if (followTarget === "friend") {
+    if (driverMarker) return driverMarker.getPosition();
+    if (myPos) { const [lng, lat] = wgs84ToGcj02(myPos.lng, myPos.lat); return new AMap.LngLat(lng, lat); }
+    return null;
+  }
+  const cv = followCoview();
+  if (cv && cv.marker) return cv.marker.getPosition();
+  if (followCoviewId()) return null;
+  if (myPos) { const [lng, lat] = wgs84ToGcj02(myPos.lng, myPos.lat); return new AMap.LngLat(lng, lat); }
+  return null;
+}
+
 // 刷新用户选择器：显示框（名字/头像）、勾选态、菜单项可见性
 function updateUserSelector() {
   const selector = $("userSelector");
   const menu = $("usMenu");
   if (!selector || !menu) return;
   // 显示框：头像 + 名字
+  const cvId = followCoviewId();
+  let name = "我";
+  let avatar = userProfile.avatar;
+  let fallback = (userProfile.name || "我").slice(0, 1);
   if (followTarget === "friend" && driverMarker) {
-    $("usName").textContent = driverName || "好友";
-    renderCircleAvatar($("usAvatar"), driverAvatarData, (driverName || "好").slice(0, 1));
-  } else {
-    $("usName").textContent = "我";
-    renderCircleAvatar($("usAvatar"), userProfile.avatar, userProfile.name.slice(0, 1));
+    name = driverName || "好友";
+    avatar = driverAvatarData;
+    fallback = (driverName || "好").slice(0, 1);
+  } else if (cvId && coViews.has(cvId)) {
+    const cv = coViews.get(cvId);
+    name = cv.name || "好友";
+    avatar = cv.avatarData;
+    fallback = (cv.name || "好").slice(0, 1);
   }
+  $("usName").textContent = name;
+  renderCircleAvatar($("usAvatar"), avatar, fallback);
   // 勾选状态
   $("usCheckMe").textContent = followTarget === "me" ? "✓" : "";
   $("usCheckFriend").textContent = followTarget === "friend" && driverMarker ? "✓" : "";
@@ -1247,10 +1305,54 @@ function updateUserSelector() {
   $("usItemFriend").style.display = driverMarker ? "flex" : "none";
   $("usItemStop").style.display = mode === "view" ? "flex" : "none";
   // 菜单项里的头像/名字
-  renderCircleAvatar($("usAvMe"), userProfile.avatar, userProfile.name.slice(0, 1));
+  renderCircleAvatar($("usAvMe"), userProfile.avatar, (userProfile.name || "我").slice(0, 1));
   $("usTxtMe").textContent = "我";
   renderCircleAvatar($("usAvFriend"), driverAvatarData, (driverName || "好").slice(0, 1));
   $("usTxtFriend").textContent = driverName || "好友";
+  // 房间内其他查看者（协作者）：动态生成菜单项
+  renderCoViewItems();
+}
+
+// 渲染协作者菜单项：放在「我」与「好友」之间（与安卓端顺序一致）
+function renderCoViewItems() {
+  const box = $("usCoViews");
+  if (!box) return;
+  box.innerHTML = "";
+  coViews.forEach((cv, fid) => {
+    const item = document.createElement("div");
+    item.className = "us-item";
+    const av = document.createElement("div");
+    av.className = "us-av";
+    renderCircleAvatar(av, cv.avatarData, (cv.name || "好").slice(0, 1));
+    const txt = document.createElement("div");
+    txt.className = "us-txt";
+    txt.textContent = cv.name || "好友";
+    const check = document.createElement("div");
+    check.className = "us-check";
+    check.textContent = followCoviewId() === fid ? "✓" : "";
+    item.appendChild(av);
+    item.appendChild(txt);
+    item.appendChild(check);
+    item.addEventListener("click", (e) => { e.stopPropagation(); onSelectCoView(fid); });
+    box.appendChild(item);
+  });
+}
+
+// 选择某位协作者使其位置居中（再次点击取消跟随），同安卓端的协作者选择逻辑
+function onSelectCoView(fid) {
+  const cv = coViews.get(fid);
+  if (!cv || !cv.marker) return;
+  const key = "friend:" + fid;
+  followTarget = (followCoviewId() === fid) ? null : key;
+  overviewMode = false;
+  followDirection = false;
+  locStep = 0;
+  setLocateIcon();
+  if (followTarget === key && map && map.setZoomAndCenter) {
+    map.setZoomAndCenter(16, cv.marker.getPosition());
+  }
+  updateUserSelector();
+  $("usMenu").style.display = "none";
 }
 
 // 圆形头像：有头像用背景图，无头像显示首字符
@@ -1327,6 +1429,7 @@ function updateArrowG(g, heading) {
 function refreshAllArrows() {
   if (myPos && myPos.heading != null) updateArrowG(myArrowG, myPos.heading);
   if (driverHeading != null) updateArrowG(driverArrowG, driverHeading);
+  coViews.forEach((cv) => { if (cv.arrowG && cv.heading != null) updateArrowG(cv.arrowG, cv.heading); });
 }
 
 // ============================================================
