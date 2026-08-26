@@ -813,6 +813,8 @@ function stopView() {
   mode = "idle";
   viewCode = null;
   if (joinTimer) { clearInterval(joinTimer); joinTimer = null; }
+  // 先发 leave 通知分享端「我已退出」，分享端才能停止对该好友重连并清除定位标
+  if (signaling) { try { signaling.send({ type: "leave", id: friendId }); } catch (e) {} }
   // 关闭语音对讲
   if (voice) { try { voice.disable(); } catch (e) {} }
   hideVoice();
@@ -1551,6 +1553,8 @@ function bindEvents() {
   window.addEventListener("beforeunload", () => {
     if (myWatchId != null) navigator.geolocation.clearWatch(myWatchId);
     if (joinTimer) clearInterval(joinTimer);
+    // 尽力通知分享端我已退出（关页时 Ably 发送不一定来得及，安卓端另有重连超时兜底）
+    if (mode !== "share" && signaling) { try { signaling.send({ type: "leave", id: friendId }); } catch (e) {} }
     if (mode === "share") {
       sharePeers.forEach((p) => { try { if (p.pc) p.pc.close(); } catch (e) {} });
       sharePeers.clear();
