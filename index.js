@@ -10,6 +10,9 @@ const $ = (id) => document.getElementById(id);
 let map = null;
 let mode = "idle";              // "idle" | "share" | "view"
 let pc = null, dc = null, signaling = null;
+// 分享端多好友：friendId -> 连接。每个好友一条独立 PeerConnection，互不干扰，
+// 可同时向多位查看者直连上报位置，并互相中继其他查看者的位置/资料（多人房间，同安卓端）。
+let sharePeers = new Map();
 let shareCode = null;           // 分享口令
 let viewCode = null;            // 正在查看的口令（查看模式）
 let joinTimer = null;           // 查看者重发 join 定时器
@@ -207,7 +210,12 @@ function stopShare() {
   // 关闭语音对讲（停麦克风、广播收声给对端）
   if (voice) { try { voice.disable(); } catch (e) {} }
   hideVoice(); // 隐藏语音按钮
-  if (pc) { try { pc.close(); } catch (e) {} pc = null; }
+  // 关闭所有好友连接，并让房间内其他查看者移除该好友的定位标
+  sharePeers.forEach((p, fid) => {
+    broadcastPeerLeave(fid);
+    closeSharePeer(fid);
+  });
+  sharePeers.clear();
   if (signaling) { try { signaling.close(); } catch (e) {} signaling = null; }
   shareCode = null;
   mode = "idle";
@@ -252,92 +260,188 @@ async function initShare(code) {
   try {
     signaling = await connectSignaling("hereiam:" + code, onSignalShare);
     setShareStatus("等待好友打开链接加入…", false);
-    setIndicator(true);
+    // 指示灯在有人真正加入并建立点对点直连后才点亮（由 updateConnectedStatus 控制），
+    // 刚点击分享、还没人加入时保持灰色（同安卓端）。
+    setIndicator(false);
   } catch (e) {
     setShareStatus("信令连接失败，请检查网络", false);
   }
 }
 
-// 分享者：收到好友 join → 创建 WebRTC 连接并发 offer
-function createConnection() {
-  if (pc) { try { pc.close(); } catch (e) {} }
-  pc = new RTCPeerConnection({ iceServers: CONFIG.stunServers });
-  // 接收好友的音频轨道（语音对讲）
-  if (voice) pc.ontrack = (e) => { try { voice.handleRemoteTrack(e); } catch (err) {} };
-  dc = pc.createDataChannel("location");
-  dc.onopen = () => {
-    // 连接建立后把自己的资料（用户名+头像）推送给好友端
-    sendMyProfile();
+// 分享者：收到好友 join → 为该好友创建独立 WebRTC 连接并发 offer（每位好友一条连接）
+function createSharePeer(fid) {
+  const old = sharePeers.get(fid);
+  if (old) { try { old.pc.close(); } catch (e) {} sharePeers.delete(fid); }
+  const p = { friendId: fid, pc: null, dc: null, connected: false, name: null, avatarData: null };
+  const c = new RTCPeerConnection({ iceServers: CONFIG.stunServers });
+  p.pc = c;
+  // 接收该好友的音频轨道（语音对讲）
+  if (voice) c.ontrack = (e) => { try { voice.handleRemoteTrack(e); } catch (err) {} };
+  const dc2 = c.createDataChannel("location");
+  p.dc = dc2;
+  dc2.onopen = () => {
+    p.connected = true;
+    // 连接建立后把自己的资料（用户名+头像）推送给该好友端
+    sendProfileToFid(fid);
+    // 立刻把这名好友接进"多人房间"：把自己 & 房间内其他查看者的位置推给它
     startLocationStream();
-    // 新连接：重置语音状态并亮出对讲按钮
-    if (voice) { try { voice.reset(); } catch (e) {} }
+    relayAllPeersTo(fid);
     showVoice();
+    updateConnectedStatus();
   };
-  // 双向共享：接收查看者（安卓 App）回传的位置/资料，在地图上显示（对称协议：收到 WGS-84，转 GCJ-02 显示）
-  dc.onmessage = (ev) => {
+  // 双向共享：接收该查看者（安卓 App/网页）回传的位置/资料，在地图上显示并中继给房间内其他查看者
+  dc2.onmessage = (ev) => {
     let m;
     try { m = JSON.parse(ev.data); } catch (e) { return; }
-    if (m && m.type === "profile") {
-      setDriverProfile(m.name, m.avatar);
-    } else if (m && m.type === "voice") {
-      // 语音对讲控制消息（静音/说话中/关闭）
-      if (voice) { try { voice.handleControl(m); } catch (e) {} }
-    } else if (m && m.lat !== undefined) {
-      onLocation(m);
-    }
+    handleSharePeerData(fid, m);
   };
-
-  pc.onicecandidate = (e) => {
+  c.onicecandidate = (e) => {
     if (e.candidate && signaling)
-      signaling.send({ type: "candidate", candidate: e.candidate, id: friendId });
+      signaling.send({ type: "candidate", candidate: e.candidate, id: fid });
   };
-  pc.onconnectionstatechange = () => {
-    if (!pc) return;
-    const s = pc.connectionState;
+  c.onconnectionstatechange = () => {
+    if (!p) return;
+    const s = c.connectionState;
     if (s === "connected") {
+      p.connected = true;
       setShareStatus("已点对点直连，正在实时上报位置", true);
-      setIndicator(true);
       $("stopBtn").style.display = "block";
       showVoice(); // 点对点直连后才显示语音对讲入口
+      updateConnectedStatus();
     } else if (s === "failed" || s === "disconnected") {
-      setShareStatus("连接断开，等待好友重新加入…", false);
-      setIndicator(false);
-      hideVoice();
+      // 该好友断开：通知房间内其他查看者移除其定位标，并清理这条连接
+      broadcastPeerLeave(fid);
+      closeSharePeer(fid);
+      updateConnectedStatus();
+      if (sharePeers.size === 0) {
+        setShareStatus("连接断开，等待好友重新加入…", false);
+        setIndicator(false);
+        hideVoice();
+      }
+    } else if (s === "closed") {
+      closeSharePeer(fid);
+      updateConnectedStatus();
     }
   };
-
+  sharePeers.set(fid, p);
   (async () => {
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    if (signaling) signaling.send({ type: "offer", sdp: offer, id: friendId });
+    const offer = await c.createOffer();
+    await c.setLocalDescription(offer);
+    if (signaling) signaling.send({ type: "offer", sdp: offer, id: fid });
   })();
 }
 
+// 处理某位查看者回传的数据（对称协议：收到 WGS-84，转 GCJ-02 显示；并中继给房间内其他查看者）
+function handleSharePeerData(fid, m) {
+  if (m && m.type === "profile") {
+    const p = sharePeers.get(fid);
+    if (p) { if (m.name) p.name = m.name; if (m.avatar) p.avatarData = m.avatar; }
+    // 该查看者资料中继给房间内其他查看者（带 friendId，对方按 co-view 显示）
+    relayToOthers(fid, m);
+    setCoViewProfile(fid, m.name, m.avatar);   // 分享者自己的地图上也显示
+    updateUserSelector();
+  } else if (m && m.type === "voice") {
+    // 语音对讲控制消息（静音/说话中/关闭）
+    if (voice) { try { voice.handleControl(m); } catch (e) {} }
+  } else if (m && m.type === "leave") {
+    // 本连接主动收到对方 leave 属异常，忽略（leave 由分享者侧在断开时统一下发）
+  } else if (m && m.lat !== undefined) {
+    // 该查看者的位置：中继给房间内其他查看者 + 展示在分享者自己的地图上
+    relayToOthers(fid, m);
+    showCoView(fid, m);
+    updateUserSelector();
+  }
+}
+
+// 房间内中继：把来自某查看者(fid)的消息标记 friendId 后转发给房间内其他所有已直连查看者
+function relayToOthers(fromFid, m) {
+  if (mode !== "share") return;
+  const copy = Object.assign({}, m);
+  copy.friendId = fromFid;
+  const json = JSON.stringify(copy);
+  sharePeers.forEach((p, fid) => {
+    if (fid === fromFid) return;
+    if (p.dc && p.dc.readyState === "open") { try { p.dc.send(json); } catch (e) {} }
+  });
+}
+
+// 把"房间内已有的其他查看者位置/资料"推给新加入的某查看者，让它一进来就能看到所有人
+function relayAllPeersTo(toFid) {
+  sharePeers.forEach((p, fid) => {
+    if (fid === toFid || !p.connected) return;
+    if (fid && (p.name || p.avatarData)) setCoViewAck(p, fid, toFid);
+    // 位置：该查看者持续上报，无需快照；这里为其补充发送一次已缓存的资料
+  });
+}
+function setCoViewAck(p, fid, toFid) {
+  const prof = { type: "profile", name: p.name, avatar: p.avatarData, friendId: fid };
+  const t = sharePeers.get(toFid);
+  if (t && t.dc && t.dc.readyState === "open") { try { t.dc.send(JSON.stringify(prof)); } catch (e) {} }
+}
+
+// 某查看者离开/断开：通知房间内其他查看者移除它的定位标
+function broadcastPeerLeave(fid) {
+  if (mode !== "share") return;
+  const leave = JSON.stringify({ type: "leave", friendId: fid });
+  sharePeers.forEach((p, fid2) => {
+    if (fid2 === fid) return;
+    if (p.dc && p.dc.readyState === "open") { try { p.dc.send(leave); } catch (e) {} }
+  });
+  removeCoView(fid);   // 分享者自己的地图上也移除该定位标
+  updateUserSelector();
+}
+
+// 关闭某好友连接并从 sharePeers 移除
+function closeSharePeer(fid) {
+  const p = sharePeers.get(fid);
+  if (!p) return;
+  sharePeers.delete(fid);
+  try { if (p.dc) p.dc.close(); } catch (e) {}
+  try { p.pc.close(); } catch (e) {}
+}
+
+// 根据当前是否有好友已直连，点亮/熄灭右上角指示灯（有人真正加入才亮，同安卓端）
+function updateConnectedStatus() {
+  let any = false;
+  sharePeers.forEach(p => { if (p.connected) any = true; });
+  setIndicator(any);
+}
+
 async function onSignalShare(msg) {
+  const fid = msg.id;
   if (msg.type === "join") {
-    // 好友加入/重连：重建连接并发 offer
-    if (pc && pc.connectionState !== "failed" && pc.connectionState !== "closed") return;
-    createConnection();
+    // 好友加入/重连：为其创建（或重建）连接并发 offer
+    const p = sharePeers.get(fid);
+    const st = p && p.pc ? p.pc.connectionState : null;
+    if (p && (p.connected || st === "connecting" || st === "connected" || st === "new")) return;
+    createSharePeer(fid);
   } else if (msg.type === "answer") {
-    if (pc) {
-      try { await pc.setRemoteDescription(msg.sdp); } catch (e) {}
-    }
+    const p = sharePeers.get(fid);
+    if (p && p.pc) { try { await p.pc.setRemoteDescription(msg.sdp); } catch (e) {} }
   } else if (msg.type === "offer") {
-    // 连接已建立时收到的 offer = 好友发起的语音重协商 → 就地应答
-    if (pc && pc.connectionState === "connected" && pc.signalingState === "stable") {
-      await answerVoiceRenegotiation(voice, pc, signaling, msg.sdp, function (o) {
-        if (o) o.id = friendId; // 应答须带本端 friendId，安卓端认得出路由
+    // 某好友连接已建立时收到的 offer = 该好友发起的语音重协商 → 就地应答并路由给该好友
+    const p = sharePeers.get(fid);
+    if (p && p.pc && p.pc.connectionState === "connected" && p.pc.signalingState === "stable") {
+      await answerVoiceRenegotiation(voice, p.pc, signaling, msg.sdp, function (o) {
+        if (o) o.id = p.friendId; // 应答须带该好友 friendId，安卓端认得出路由
         if (signaling) { try { signaling.send(o); } catch (e) {} }
       });
     }
   } else if (msg.type === "candidate") {
-    if (pc) { try { await pc.addIceCandidate(msg.candidate); } catch (e) {} }
+    const p = sharePeers.get(fid);
+    if (p && p.pc) { try { await p.pc.addIceCandidate(msg.candidate); } catch (e) {} }
   } else if (msg.type === "leave" || msg.type === "bye") {
-    setShareStatus("好友已退出查看", false);
-    // 好友退出：立即移除其定位标（避免残留最后位置在地图上）并自动跳回自己
-    if (voice) { try { voice.reset(); } catch (e) {} }
-    removeDriverMarker();
-    revertToMe();
+    // 某好友退出：若带 friendId 则按该好友处理
+    if (fid && sharePeers.has(fid)) {
+      broadcastPeerLeave(fid);
+      closeSharePeer(fid);
+      updateConnectedStatus();
+      if (sharePeers.size === 0) {
+        setShareStatus("所有好友已退出查看", false);
+        setIndicator(false);
+        hideVoice();
+      }
+    }
   }
 }
 
@@ -373,9 +477,7 @@ function startMyLocation() {
         updateMyMarker();
         // 双向共享：数据通道打开时把自己的位置实时回传对方
         // （对称协议：一律携带 type:"loc"，发送 WGS-84，接收端统一转 GCJ-02；含 gray 字段）
-        if (dc && dc.readyState === "open") {
-          dc.send(JSON.stringify(myPos));
-        }
+        sendMyLocationNow();
       },
       (err) => {
         retries++;
@@ -680,7 +782,7 @@ function startLocationStream() {
   if (!myPos) return;
   const accText = myPos.acc > 0 ? " · 精度约" + myPos.acc + "米" : "";
   setShareStatus("已连接，正在实时上报位置" + accText, true);
-  if (dc && dc.readyState === "open") dc.send(JSON.stringify(myPos));
+  sendMyLocationNow();
 }
 
 // ============================================================
@@ -1317,7 +1419,7 @@ function initCompass() {
           }
           if (now - lastCompassSend >= 500) {
             lastCompassSend = now;
-            if (dc && dc.readyState === "open") sendMyLocationNow();
+            sendMyLocationNow();
           }
         }
       },
@@ -1339,14 +1441,31 @@ function initCompass() {
   }
 }
 
-// 把自己的资料（用户名 + 头像）推送给当前对端
+// 把「我」的资料（用户名 + 头像）推送给指定好友（连接建立时）
+function sendProfileToFid(fid) {
+  const p = sharePeers.get(fid);
+  if (!p || !p.dc || p.dc.readyState !== "open") return;
+  try {
+    const me = getUserProfile();
+    const msg = { type: "profile", name: me.name };
+    if (me.avatar) msg.avatar = me.avatar;
+    p.dc.send(JSON.stringify(msg));
+  } catch (e) {}
+}
+
+// 把自己的资料（用户名 + 头像）广播给当前所有对端（分享端=每个好友；查看端=单连接）
 function sendMyProfile() {
-  if (!dc || dc.readyState !== "open") return;
   try {
     const p = getUserProfile();
     const msg = { type: "profile", name: p.name };
     if (p.avatar) msg.avatar = p.avatar;
-    dc.send(JSON.stringify(msg));
+    if (mode === "share") {
+      sharePeers.forEach((peer) => {
+        if (peer.dc && peer.dc.readyState === "open") { try { peer.dc.send(JSON.stringify(msg)); } catch (e) {} }
+      });
+    } else if (dc && dc.readyState === "open") {
+      dc.send(JSON.stringify(msg));
+    }
   } catch (e) {}
 }
 // 用户中心修改资料后：刷新自己的定位标头像 + 重发 profile 给对端
@@ -1356,17 +1475,19 @@ onUserProfileChanged = function () {
 };
 
 // 立即把当前自己的位置回传给对端（对称协议：一律发 WGS-84，接收端统一转 GCJ-02）
+// 分享端广播给所有好友；查看端发给单连接。
 function sendMyLocationNow() {
-  if (!dc || dc.readyState !== "open" || !myPos) return;
+  if (!myPos) return;
+  const msg = (mode === "view")
+    ? { type: "loc", lat: myPos.lat, lng: myPos.lng, heading: myPos.heading, acc: myPos.acc, t: Date.now(), gray: myPos.gray }
+    : myPos;   // share：直接广播 myPos（含 type:"loc" + gray 字段）
+  const json = JSON.stringify(msg);
   if (mode === "share") {
-    dc.send(JSON.stringify(myPos));   // 含 gray 字段
-  } else if (mode === "view") {
-    dc.send(JSON.stringify({
-      type: "loc",
-      lat: myPos.lat, lng: myPos.lng,
-      heading: myPos.heading, acc: myPos.acc, t: Date.now(),
-      gray: myPos.gray,
-    }));
+    sharePeers.forEach((peer) => {
+      if (peer.dc && peer.dc.readyState === "open") { try { peer.dc.send(json); } catch (e) {} }
+    });
+  } else if (dc && dc.readyState === "open") {
+    try { dc.send(json); } catch (e) {}
   }
 }
 
@@ -1425,13 +1546,27 @@ function bindEvents() {
   window.addEventListener("beforeunload", () => {
     if (myWatchId != null) navigator.geolocation.clearWatch(myWatchId);
     if (joinTimer) clearInterval(joinTimer);
-    if (pc) { try { pc.close(); } catch (e) {} }
+    if (mode === "share") {
+      sharePeers.forEach((p) => { try { if (p.pc) p.pc.close(); } catch (e) {} });
+      sharePeers.clear();
+    } else if (pc) {
+      try { pc.close(); } catch (e) {}
+    }
     if (signaling) { try { signaling.close(); } catch (e) {} }
   });
 }
 
 // 语音对讲：创建控制器并绑定 UI（点对点连接后才显示按钮）
-voice = createVoiceController(() => ({ pc: pc, dc: dc, signaling: signaling }));
+// 分享端：控制器内部上报「当前所有好友连接」，语音广播给房间内每位查看者（多人房间，同安卓端）；
+// 查看端：仍为单一连接。
+voice = createVoiceController(() => {
+  if (mode === "share") {
+    const arr = [];
+    sharePeers.forEach((p) => { if (p.pc) arr.push({ pc: p.pc, dc: p.dc, signaling: signaling, id: p.friendId }); });
+    return arr;
+  }
+  return { pc: pc, dc: dc, signaling: signaling };
+});
 voice.friendId = friendId; // 语音重协商 offer 须携带本端 friendId，安卓端才认得出并正确路由
 bindVoiceUI(voice);
 

@@ -17,7 +17,7 @@
 
 function createVoiceController(getConn) {
   var v = {
-    getConn: getConn,              // () => ({ pc, dc, signaling })
+    getConn: getConn,              // () => 连接对象 或 连接对象数组（分享端返回全部好友连接）
     stream: null,                  // 本地麦克风流
     enabled: false,                // 是否已开启语音
     mode: "ptt",                   // "ptt" 按键说话 | "continuous" 免提持续
@@ -34,11 +34,23 @@ function createVoiceController(getConn) {
     onRemote: null,                // 对方状态变化回调（页面刷新提示）
   };
 
+  // 把 getConn() 的返回值统一规整为连接对象数组（分享端可能是数组，查看端是单对象）
+  function toConns() {
+    var r = getConn();
+    if (!r) return [];
+    if (Array.isArray(r)) return r;
+    return [r];
+  }
+
   // ---------- 数据通道发送控制消息（P2P，不经服务器） ----------
   v.send = function (obj) {
-    var s = v.getConn() || {};
-    if (s.dc && s.dc.readyState === "open") {
-      try { s.dc.send(JSON.stringify(mergeVoice(obj))); } catch (e) {}
+    var json = JSON.stringify(mergeVoice(obj));
+    var conns = toConns();
+    for (var i = 0; i < conns.length; i++) {
+      var d = conns[i].dc;
+      if (d && d.readyState === "open") {
+        try { d.send(json); } catch (e) {}
+      }
     }
   };
 
@@ -93,15 +105,18 @@ function createVoiceController(getConn) {
   };
 
   // ---------- 开启一次 offer/answer 协商（经 Ably 信令） ----------
-  v.renegotiate = function (pc, signaling) {
+  // conn = { pc, signaling, id? }；id 不传时回退到 v.friendId（查看端）
+  v.renegotiate = function (conn) {
+    if (!conn || !conn.pc || !conn.signaling) return Promise.resolve();
     v.renegotiating = true;
-    return pc.createOffer().then(function (offer) {
-      return pc.setLocalDescription(offer);
+    return conn.pc.createOffer().then(function (offer) {
+      return conn.pc.setLocalDescription(offer);
     }).then(function () {
       // 必须携带 id(=friendId)，安卓端才认得出该 offer 来自哪位好友并正确路由
-      var msg = { type: "offer", sdp: pc.localDescription };
-      if (v.friendId) msg.id = v.friendId;
-      signaling.send(msg);
+      var msg = { type: "offer", sdp: conn.pc.localDescription };
+      var id = (conn && conn.id) || v.friendId;
+      if (id) msg.id = id;
+      conn.signaling.send(msg);
     }).then(function () {
       v.renegotiating = false;
     }, function (e) {
@@ -110,30 +125,41 @@ function createVoiceController(getConn) {
     });
   };
 
-  // ---------- 开启语音：采集 → addTrack → 重协商 ----------
+  // ---------- 开启语音：采集 → 给每条连接 addTrack → 各自重协商 ----------
   v.enable = function () {
-    var s = v.getConn() || {};
-    if (!s.pc || !s.signaling) return Promise.resolve();
+    var conns = toConns().filter(function (s) { return s.pc && s.signaling; });
+    if (!conns.length) return Promise.resolve();
     return v.getMicStream().then(function (stream) {
       var tracks = stream.getAudioTracks();
-      for (var i = 0; i < tracks.length; i++) {
-        var added = false;
-        if (s.pc.getSenders) {
-          var sns = s.pc.getSenders();
-          for (var j = 0; j < sns.length; j++) {
-            if (sns[j].track === tracks[i]) { added = true; break; }
+      var jobs = [];
+      // 给每条连接加上本条音频轨，并对每条连接各自发起一次重协商
+      for (var ci = 0; ci < conns.length; ci++) {
+        var s = conns[ci];
+        // 防止 negotiateSoon(relay 的网络事件)与手动 createOffer 并发
+        if (s.pc._voiceAddBusy) continue;
+        for (var i = 0; i < tracks.length; i++) {
+          var added = false;
+          if (s.pc.getSenders) {
+            var sns = s.pc.getSenders();
+            for (var j = 0; j < sns.length; j++) {
+              if (sns[j].track === tracks[i]) { added = true; break; }
+            }
           }
+          if (!added) { try { s.pc.addTrack(tracks[i], stream); } catch (e) {} }
         }
-        if (!added) s.pc.addTrack(tracks[i], stream);
+        s.pc._voiceAddBusy = true;
+        (function (conn) {
+          jobs.push(v.renegotiate(conn).then(function () {
+            if (conn.pc) conn.pc._voiceAddBusy = false; // 完成后释放该连接的 busy 锁
+          }).catch(function () {
+            if (conn.pc) conn.pc._voiceAddBusy = false;
+          }));
+        })(s);
       }
-      // 防止 negotiateSoon(relay 的网络事件)与手动 createOffer 并发
-      if (s.pc._voiceAddBusy) return;
-      s.pc._voiceAddBusy = true;
       v.enabled = true;
       v.contOn = v.mode === "continuous";   // 免提模式：开启即说话
       v.syncSpeaking();
-      return v.renegotiate(s.pc, s.signaling).then(function () {
-        s.pc._voiceAddBusy = false;
+      return Promise.all(jobs).then(function () {
         if (v.onUi) v.onUi();
       });
     }, function (e) {
@@ -143,9 +169,8 @@ function createVoiceController(getConn) {
     });
   };
 
-  // ---------- 关闭语音：停麦克风 + 移除轨道 + 重协商 ----------
+  // ---------- 关闭语音：停麦克风 + 移除所有连接上的轨道 + 各自重协商 ----------
   v.disable = function () {
-    var s = v.getConn() || {};
     v.enabled = false;
     v.pttHeld = false;
     v.contOn = false;
@@ -157,21 +182,30 @@ function createVoiceController(getConn) {
       try { v.stream.getTracks().forEach(function (x) { v.stream.removeTrack(x); }); } catch (e) {}
       v.stream = null;
     }
-    if (s.pc) {
+    var conns = toConns();
+    var jobs = [];
+    for (var ci = 0; ci < conns.length; ci++) {
+      var s = conns[ci];
+      if (!s.pc) { jobs.push(Promise.resolve()); continue; }
       try {
         s.pc.getSenders().forEach(function (snd) {
-          if (snd.track && snd.track.kind === "audio") s.pc.removeTrack(snd);
+          if (snd.track && snd.track.kind === "audio") { try { s.pc.removeTrack(snd); } catch (e) {} }
         });
       } catch (e) {}
+      if (s.signaling && !v.renegotiating) {
+        (function (conn) {
+          jobs.push(v.renegotiate(conn).then(function () {
+            if (conn.pc) conn.pc._voiceAddBusy = false;
+          }).catch(function () {
+            if (conn.pc) conn.pc._voiceAddBusy = false;
+          }));
+        })(s);
+      } else {
+        if (s.pc) s.pc._voiceAddBusy = false;
+        jobs.push(Promise.resolve());
+      }
     }
-    var p;
-    if (s.pc && s.signaling && !v.renegotiating) {
-      p = v.renegotiate(s.pc, s.signaling).catch(function () {});
-    } else {
-      p = Promise.resolve();
-    }
-    return p.then(function () {
-      if (s.pc) s.pc._voiceAddBusy = false;
+    return Promise.all(jobs).then(function () {
       if (v.onUi) v.onUi();
     });
   };
