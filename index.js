@@ -9,14 +9,17 @@ const $ = (id) => document.getElementById(id);
 // ========== 全局状态 ==========
 let map = null;
 let mode = "idle";              // "idle" | "share" | "view"
-let pc = null, dc = null, signaling = null;
-// 分享端多好友：friendId -> 连接。每个好友一条独立 PeerConnection，互不干扰，
-// 可同时向多位查看者直连上报位置，并互相中继其他查看者的位置/资料（多人房间，同安卓端）。
-let sharePeers = new Map();
-let shareCode = null;           // 分享口令
-let viewCode = null;            // 正在查看的口令（查看模式）
-let joinTimer = null;           // 查看者重发 join 定时器
-let voice = null;               // 语音对讲控制器（createVoiceController 创建）
+let signaling = null;
+// ========== mesh 完备网格（人人皆是分享者+接收者） ==========
+// 每个端都有房间内唯一 nodeId（网页端复用会话持久化 friendId；安卓分享端用 host id）。
+// 房间成员两两直连（id 字典序小者发起 offer），位置/资料/语音点对点直达，不再区分分享端/查看端。
+// host（房间创建者）与成员地位平等；host 额外广播 host:true 供成员识别「分享者」水滴。
+let meshPeers = new Map();     // nodeId -> {pc, dc, connected, name, avatarData, offerer, haveLocalOffer}
+let hostId = null;             // 房间创建者（分享者）的 nodeId；网页端自己是 host 时 = friendId
+let shareCode = null;          // 分享口令（我是 host）
+let viewCode = null;           // 正在查看的口令（我是成员）
+let joinTimer = null;          // 周期广播 join 定时器（share/view 共用，mesh 成员发现）
+let voice = null;              // 语音对讲控制器（createVoiceController 创建）
 
 // 自己的位置（进入页面即自动定位，同 App 端）
 let myWatchId = null;           // 自己的定位 watch
@@ -212,30 +215,11 @@ function startView() {
 
 function stopShare() {
   // 注意：不清除 myWatchId —— 全局定位持续运行，地图继续显示自己的定位标
-  // 先发 bye 通知所有对端「分享已结束」，对方才能停止重连并清除定位标
+  // 先发 bye 通知所有对端「分享已结束」，对方停止重连并清除定位标
   if (signaling) { try { signaling.send({ type: "bye" }); } catch (e) {} }
-  // 关闭语音对讲（停麦克风、广播收声给对端）
+  // 广播语音关闭（停麦克风 + 收声），再统一清理（host 解散房间）
   if (voice) { try { voice.disable(); } catch (e) {} }
-  hideVoice(); // 隐藏语音按钮
-  // 关闭所有好友连接，并让房间内其他查看者移除该好友的定位标
-  sharePeers.forEach((p, fid) => {
-    broadcastPeerLeave(fid);
-    closeSharePeer(fid);
-  });
-  sharePeers.clear();
-  if (signaling) { try { signaling.close(); } catch (e) {} signaling = null; }
-  shareCode = null;
-  mode = "idle";
-  setShareStatus("已停止共享", false);
-  setIndicator(false);
-  $("stopBtn").style.display = "none";
-  $("code").textContent = "------";
-  $("qrcode").src = "";
-  // 停止共享后收起分享面板
-  hideAllPanels();
-  // 移除对端（查看者）定位标并跳回自己（同安卓端 clearAllFriends 行为）
-  removeDriverMarker();
-  revertToMe();
+  handleRoomEnded();
 }
 
 // ============================================================
@@ -255,6 +239,7 @@ function shareLink(code) {
 
 async function initShare(code) {
   mode = "share";
+  hostId = friendId;   // 我是房间创建者（host）
   $("code").textContent = code;
   const link = shareLink(code);
   $("qrcode").src =
@@ -265,8 +250,9 @@ async function initShare(code) {
   $("stopBtn").style.display = "block";
 
   try {
-    signaling = await connectSignaling("hereiam:" + code, onSignalShare);
+    signaling = await connectSignaling("hereiam:" + code, onSignalMesh);
     setShareStatus("等待好友打开链接加入…", false);
+    startJoinTimer();   // 周期广播 join（host:true），让成员发现我并与之直连
     // 指示灯在有人真正加入并建立点对点直连后才点亮（由 updateConnectedStatus 控制），
     // 刚点击分享、还没人加入时保持灰色（同安卓端）。
     setIndicator(false);
@@ -275,183 +261,282 @@ async function initShare(code) {
   }
 }
 
-// 分享者：收到好友 join → 为该好友创建独立 WebRTC 连接并发 offer（每位好友一条连接）
-function createSharePeer(fid) {
-  const old = sharePeers.get(fid);
-  if (old) { try { old.pc.close(); } catch (e) {} sharePeers.delete(fid); }
-  const p = { friendId: fid, pc: null, dc: null, connected: false, name: null, avatarData: null };
+// ============================================================
+//  mesh 核心：全员互连（位置共享 + 对讲语音人人互听）
+//  - 每个端周期广播 join（host 带 host:true）
+//  - 收到陌生 join：id 字典序小者主动发 offer，另一侧应答（避免辄锁）
+//  - offer/answer/candidate 均带 id=发送者 + to=目标，房间广播按 to 过滤
+//  - 数据通道消息统一带 friendId=发送者，接收端据此识别 host/成员
+// ============================================================
+
+// 当前房间内是否还有已直连的成员
+function meshAnyConnected() {
+  let any = false;
+  meshPeers.forEach((p) => { if (p.connected) any = true; });
+  return any;
+}
+
+// 周期广播 join（2s）：成员发现 + host 标识（share/view 共用）
+function startJoinTimer() {
+  if (joinTimer) return;
+  joinTimer = setInterval(() => {
+    if (!signaling) return;
+    try { signaling.send({ type: "join", id: friendId, host: mode === "share" }); } catch (e) {}
+  }, 2000);
+}
+function stopJoinTimer() {
+  if (joinTimer) { clearInterval(joinTimer); joinTimer = null; }
+}
+
+// 为 peerId 创建连接。offerer=true 表示由我方发起 offer；false 表示被动应答对方
+function createMeshPeer(peerId, offerer) {
+  closeMeshPeer(peerId);
+  const p = { peerId, pc: null, dc: null, connected: false, name: null, avatarData: null,
+              offerer: !!offerer, haveLocalOffer: false };
   const c = new RTCPeerConnection({ iceServers: CONFIG.stunServers });
   p.pc = c;
-  // 接收该好友的音频轨道（语音对讲）
+  // 接收该对端的音频轨（mesh 多路语音：voice 按 pc 分路播放）
   if (voice) c.ontrack = (e) => { try { voice.handleRemoteTrack(e); } catch (err) {} };
   const dc2 = c.createDataChannel("location");
   p.dc = dc2;
-  dc2.onopen = () => {
-    p.connected = true;
-    // 连接建立后把自己的资料（用户名+头像）推送给该好友端
-    sendProfileToFid(fid);
-    // 立刻把这名好友接进"多人房间"：把自己 & 房间内其他查看者的位置推给它
-    startLocationStream();
-    relayAllPeersTo(fid);
-    showVoice();
-    updateConnectedStatus();
-  };
-  // 双向共享：接收该查看者（安卓 App/网页）回传的位置/资料，在地图上显示并中继给房间内其他查看者
+  dc2.onopen = () => { p.connected = true; onPeerOpen(p); };
   dc2.onmessage = (ev) => {
-    let m;
-    try { m = JSON.parse(ev.data); } catch (e) { return; }
-    handleSharePeerData(fid, m);
+    let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+    handlePeerData(peerId, m);
   };
   c.onicecandidate = (e) => {
-    if (e.candidate && signaling)
-      signaling.send({ type: "candidate", candidate: e.candidate, id: fid });
-  };
-  c.onconnectionstatechange = () => {
-    if (!p) return;
-    const s = c.connectionState;
-    if (s === "connected") {
-      p.connected = true;
-      setShareStatus("已点对点直连，正在实时上报位置", true);
-      $("stopBtn").style.display = "block";
-      showVoice(); // 点对点直连后才显示语音对讲入口
-      updateConnectedStatus();
-    } else if (s === "failed" || s === "disconnected") {
-      // 该好友断开：通知房间内其他查看者移除其定位标，并清理这条连接
-      broadcastPeerLeave(fid);
-      closeSharePeer(fid);
-      updateConnectedStatus();
-      if (sharePeers.size === 0) {
-        setShareStatus("连接断开，等待好友重新加入…", false);
-        setIndicator(false);
-        hideVoice();
-      }
-    } else if (s === "closed") {
-      closeSharePeer(fid);
-      updateConnectedStatus();
+    if (e.candidate && signaling) {
+      try { signaling.send({ type: "candidate", candidate: e.candidate, id: friendId, to: peerId }); } catch (err) {}
     }
   };
-  sharePeers.set(fid, p);
-  (async () => {
-    const offer = await c.createOffer();
-    await c.setLocalDescription(offer);
-    if (signaling) signaling.send({ type: "offer", sdp: offer, id: fid });
-  })();
+  c.onconnectionstatechange = () => onPeerStateChange(p, c.connectionState);
+  meshPeers.set(peerId, p);
+  if (offerer) sendOfferFor(p);
+  return p;
 }
 
-// 处理某位查看者回传的数据（对称协议：收到 WGS-84，转 GCJ-02 显示；并中继给房间内其他查看者）
-function handleSharePeerData(fid, m) {
-  if (m && m.type === "profile") {
-    const p = sharePeers.get(fid);
-    if (p) { if (m.name) p.name = m.name; if (m.avatar) p.avatarData = m.avatar; }
-    // 该查看者资料中继给房间内其他查看者（带 friendId，对方按 co-view 显示）
-    relayToOthers(fid, m);
-    setCoViewProfile(fid, m.name, m.avatar);   // 分享者自己的地图上也显示
-    updateUserSelector();
-  } else if (m && m.type === "voice") {
-    // 语音对讲控制消息（静音/说话中/关闭）：中继给房间内其他查看者，让大家的说话状态同步
-    relayToOthers(fid, m);
-    if (voice) { try { voice.handleControl(m); } catch (e) {} }
-  } else if (m && m.type === "leave") {
-    // 本连接主动收到对方 leave 属异常，忽略（leave 由分享者侧在断开时统一下发）
-  } else if (m && m.lat !== undefined) {
-    // 该查看者的位置：中继给房间内其他查看者 + 展示在分享者自己的地图上
-    relayToOthers(fid, m);
-    showCoView(fid, m);
-    updateUserSelector();
+async function sendOfferFor(p) {
+  try {
+    const offer = await p.pc.createOffer();
+    await p.pc.setLocalDescription(offer);
+    p.haveLocalOffer = true;
+    if (signaling) signaling.send({ type: "offer", sdp: offer, id: friendId, to: p.peerId });
+  } catch (e) {}
+}
+
+// 连接建立后的动作：上报资料/位置、亮对讲按钮、更新指示灯
+function onPeerOpen(p) {
+  sendProfileToFid(p.peerId);
+  sendMyLocationNow();
+  showVoice();
+  updateConnectedStatus();
+  // host 兜底：把该成员的资料转给房间内其他成员（mesh 直连下重复消息幂等，无副作用）
+  if (mode === "share") {
+    const prof = meshPeers.get(p.peerId);
+    if (prof && (prof.name || prof.avatarData)) {
+      meshPeers.forEach((o, fid2) => {
+        if (fid2 === p.peerId || o.dc && o.dc.readyState !== "open") return;
+        try {
+          o.dc.send(JSON.stringify({ type: "profile", name: prof.name, avatar: prof.avatarData, friendId: p.peerId }));
+        } catch (e) {}
+      });
+    }
   }
 }
 
-// 房间内中继：把来自某查看者(fid)的消息标记 friendId 后转发给房间内其他所有已直连查看者
-function relayToOthers(fromFid, m) {
-  if (mode !== "share") return;
-  const copy = Object.assign({}, m);
-  copy.friendId = fromFid;
-  const json = JSON.stringify(copy);
-  sharePeers.forEach((p, fid) => {
-    if (fid === fromFid) return;
-    if (p.dc && p.dc.readyState === "open") { try { p.dc.send(json); } catch (e) {} }
-  });
-}
-
-// 把"房间内已有的其他查看者位置/资料"推给新加入的某查看者，让它一进来就能看到所有人
-function relayAllPeersTo(toFid) {
-  sharePeers.forEach((p, fid) => {
-    if (fid === toFid || !p.connected) return;
-    if (fid && (p.name || p.avatarData)) setCoViewAck(p, fid, toFid);
-    // 位置：该查看者持续上报，无需快照；这里为其补充发送一次已缓存的资料
-  });
-}
-function setCoViewAck(p, fid, toFid) {
-  const prof = { type: "profile", name: p.name, avatar: p.avatarData, friendId: fid };
-  const t = sharePeers.get(toFid);
-  if (t && t.dc && t.dc.readyState === "open") { try { t.dc.send(JSON.stringify(prof)); } catch (e) {} }
-}
-
-// 某查看者离开/断开：通知房间内其他查看者移除它的定位标
-function broadcastPeerLeave(fid) {
-  if (mode !== "share") return;
-  const leave = JSON.stringify({ type: "leave", friendId: fid });
-  sharePeers.forEach((p, fid2) => {
-    if (fid2 === fid) return;
-    if (p.dc && p.dc.readyState === "open") { try { p.dc.send(leave); } catch (e) {} }
-  });
-  removeCoView(fid);   // 分享者自己的地图上也移除该定位标
-  updateUserSelector();
-}
-
-// 关闭某好友连接并从 sharePeers 移除
-function closeSharePeer(fid) {
-  const p = sharePeers.get(fid);
+function onPeerStateChange(p, st) {
   if (!p) return;
-  sharePeers.delete(fid);
+  if (st === "connected") {
+    p.connected = true;
+    setShareStatus("已点对点直连，正在实时上报位置", true);
+    $("stopBtn").style.display = "block";
+    showVoice();
+    updateConnectedStatus();
+  } else if (st === "disconnected" || st === "failed") {
+    // 网络波动断开：清理连接，交由 join 周期广播自动重建（id 小者 offer 规则）
+    closeMeshPeer(p.peerId);
+    removeCoView(p.peerId);       // 一并移除其定位标（离开/掉线）
+    updateUserSelector();
+    updateConnectedStatus();
+    if (meshPeers.size === 0 && mode === "share") {
+      setShareStatus("连接断开，等待好友重新加入…", false);
+      setIndicator(false);
+      hideVoice();
+    }
+  } else if (st === "closed") {
+    closeMeshPeer(p.peerId);
+    updateConnectedStatus();
+  }
+}
+
+// 关闭某 peer 连接并从 meshPeers 移除
+function closeMeshPeer(peerId) {
+  const p = meshPeers.get(peerId);
+  if (!p) return;
+  meshPeers.delete(peerId);
   try { if (p.dc) p.dc.close(); } catch (e) {}
   try { p.pc.close(); } catch (e) {}
 }
 
-// 根据当前是否有好友已直连，点亮/熄灭右上角指示灯（有人真正加入才亮，同安卓端）
-function updateConnectedStatus() {
-  let any = false;
-  sharePeers.forEach(p => { if (p.connected) any = true; });
-  setIndicator(any);
+// 某成员离开：清理连接 + 移除其定位标
+function leaveMeshPeer(peerId) {
+  closeMeshPeer(peerId);
+  removeCoView(peerId);
+  updateUserSelector();
+  updateConnectedStatus();
+  if (meshPeers.size === 0 && mode === "share") {
+    setShareStatus("所有好友已退出查看", false);
+    setIndicator(false);
+    hideVoice();
+  }
 }
 
-async function onSignalShare(msg) {
-  const fid = msg.id;
+// host（房间创建者）被识别时的处理：若此前把它当协作者显示了，切换为主定位标
+function adoptHost(peerId) {
+  if (hostId === peerId) return;
+  hostId = peerId;
+  removeCoView(peerId);
+  updateUserSelector();
+}
+
+// ========== 信令处理（share/view 通用） ==========
+async function onSignalMesh(msg) {
+  // 房间广播：offer/answer/candidate 带 to=目标，非本端一律忽略
+  if (msg.to && msg.to !== friendId) return;
   if (msg.type === "join") {
-    // 好友加入/重连：为其创建（或重建）连接并发 offer
-    const p = sharePeers.get(fid);
-    const st = p && p.pc ? p.pc.connectionState : null;
-    if (p && (p.connected || st === "connecting" || st === "connected" || st === "new")) return;
-    createSharePeer(fid);
-  } else if (msg.type === "answer") {
-    const p = sharePeers.get(fid);
-    if (p && p.pc) { try { await p.pc.setRemoteDescription(msg.sdp); } catch (e) {} }
+    const them = msg.id; if (!them || them === friendId) return;
+    if (mode === "view" && msg.host) adoptHost(them);   // 记录分享者（host），转主定位标
+    if (meshPeers.has(them)) return;                    // 已连接/连接中
+    if (mode === "share") {
+      // host 总是主动 offer（兼容旧版查看端只等 host offer 的行为；双方同发 offer 由 glare 兜底）
+      createMeshPeer(them, true);
+    } else if (them < friendId) {
+      createMeshPeer(them, true);  // 我 offer；否则等对方 offer（join 周期广播兜底）
+    }
   } else if (msg.type === "offer") {
-    // 某好友连接已建立时收到的 offer = 该好友发起的语音重协商 → 就地应答并路由给该好友
-    const p = sharePeers.get(fid);
-    if (p && p.pc && p.pc.connectionState === "connected" && p.pc.signalingState === "stable") {
-      await answerVoiceRenegotiation(voice, p.pc, signaling, msg.sdp, function (o) {
-        if (o) o.id = p.friendId; // 应答须带该好友 friendId，安卓端认得出路由
+    const them = msg.id; if (!them) return;
+    const ex = meshPeers.get(them);
+    if (ex && ex.pc && ex.pc.connectionState === "connected" && ex.pc.signalingState === "stable") {
+      // 已建立连接上的语音重协商 offer → 就地应答
+      await answerVoiceRenegotiation(voice, ex.pc, signaling, msg.sdp, (o) => {
+        if (o) { o.id = friendId; o.to = them; }
         if (signaling) { try { signaling.send(o); } catch (e) {} }
       });
+    } else {
+      await handleMeshOffer(them, msg.sdp);
     }
+  } else if (msg.type === "answer") {
+    const ex = meshPeers.get(msg.id);
+    if (ex && ex.pc) { try { await ex.pc.setRemoteDescription(msg.sdp); } catch (e) {} }
   } else if (msg.type === "candidate") {
-    const p = sharePeers.get(fid);
-    if (p && p.pc) { try { await p.pc.addIceCandidate(msg.candidate); } catch (e) {} }
-  } else if (msg.type === "leave" || msg.type === "bye") {
-    // 某好友退出：若带 friendId 则按该好友处理
-    if (fid && sharePeers.has(fid)) {
-      broadcastPeerLeave(fid);
-      closeSharePeer(fid);
-      updateConnectedStatus();
-      if (sharePeers.size === 0) {
-        setShareStatus("所有好友已退出查看", false);
-        setIndicator(false);
-        hideVoice();
-      }
+    const ex = meshPeers.get(msg.id);
+    if (ex && ex.pc) { try { await ex.pc.addIceCandidate(msg.candidate); } catch (e) {} }
+  } else if (msg.type === "leave") {
+    if (msg.id) leaveMeshPeer(msg.id);
+  } else if (msg.type === "bye") {
+    handleRoomEnded();   // host 解散房间
+  }
+}
+
+// 应答陌生 offer 建连；若恰与我方 offer 冲突（辄锁 glare），放弃本地的、按对方走
+async function handleMeshOffer(them, sdp) {
+  const ex = meshPeers.get(them);
+  if (ex && ex.haveLocalOffer) { closeMeshPeer(them); }   // 我方放弃，应答对方
+  const p = meshPeers.get(them) || createMeshPeer(them, false);
+  try {
+    await p.pc.setRemoteDescription(sdp);
+    const ans = await p.pc.createAnswer();
+    await p.pc.setLocalDescription(ans);
+    p.haveLocalOffer = false;
+    if (signaling) signaling.send({ type: "answer", sdp: ans, id: friendId, to: them });
+  } catch (e) {
+    closeMeshPeer(them);
+  }
+}
+
+// 房间结束（host 发 bye / 我方主动停止）：统一清理全部连接与 UI
+function handleRoomEnded() {
+  stopJoinTimer();
+  meshPeers.forEach((p) => closeMeshPeer(p.peerId));
+  meshPeers.clear();
+  if (signaling) { try { signaling.close(); } catch (e) {} signaling = null; }
+  if (voice) { try { voice.reset(); } catch (e) {} }
+  hideVoice();
+  removeDriverMarker();
+  setIndicator(false);
+  const wasShare = mode === "share";
+  mode = "idle";
+  hostId = null;
+  if (wasShare) {
+    shareCode = null;
+    setShareStatus("已停止共享", false);
+    $("stopBtn").style.display = "none";
+    $("code").textContent = "------";
+    $("qrcode").src = "";
+    hideAllPanels();
+  } else {
+    viewCode = null;
+    setViewStatus("对方已结束共享，可关闭", false);
+    $("viewPanel").style.display = "none";
+    hideOverlay();
+  }
+  revertToMe();
+}
+
+// ========== 收到的 peer 数据（mesh 下每端直接处理；host 顺带兜底中继并展示） ==========
+function handlePeerData(peerId, m) {
+  if (!m) return;
+  if (m.type === "profile") {
+    if (m.host && mode === "view") adoptHost(peerId);   // profile 也带 host 标记，join 丢失时仍能识别分享者
+    const p = meshPeers.get(peerId);
+    if (p) { if (m.name) p.name = m.name; if (m.avatar) p.avatarData = m.avatar; }
+    if (mode === "share") {
+      setCoViewProfile(peerId, m.name, m.avatar);
+      relayPeerPacket(peerId, m);                     // host 兜底中继（幂等）
+    } else if (hostId && peerId === hostId) {
+      setDriverProfile(m.name, m.avatar);             // 分享者资料 → 主定位标
+    } else {
+      setCoViewProfile(peerId, m.name, m.avatar);
+    }
+    updateUserSelector();
+  } else if (m.type === "voice") {
+    // 对端语音控制消息（静音/说话中/关闭）：直达本端；host 顺带兜底中继给其他成员（幂等）
+    if (mode === "share") relayPeerPacket(peerId, m);
+    if (voice) { try { voice.handleControl(m); } catch (e) {} }
+  } else if (m.type === "leave" && m.friendId) {
+    removeCoView(m.friendId);   // 历史数据通道 leave（现改走信令），幂等处理
+  } else if (m.lat !== undefined) {
+    if (mode === "share") {
+      showCoView(peerId, m);                          // 成员位置直接显示给 host
+      relayPeerPacket(peerId, m);                     // host 兜底中继（mesh 直连下幂等）
+      updateUserSelector();
+    } else if (hostId && peerId === hostId) {
+      onLocation(m);                                  // 分享者（host）位置 → 主定位标
+    } else {
+      showCoView(peerId, m);
     }
   }
 }
+
+// host 兜底中继：把来自 fromId 成员的消息标记 friendId 后转发给其他已连接成员
+function relayPeerPacket(fromId, m) {
+  if (mode !== "share") return;
+  const copy = Object.assign({}, m);
+  copy.friendId = fromId;
+  const json = JSON.stringify(copy);
+  meshPeers.forEach((p, fid) => {
+    if (fid === fromId) return;
+    if (p.dc && p.dc.readyState === "open") { try { p.dc.send(json); } catch (e) {} }
+  });
+}
+
+// 根据当前是否有成员已直连，点亮/熄灭右上角指示灯（有人真正加入才亮，同安卓端）
+function updateConnectedStatus() {
+  setIndicator(meshAnyConnected());
+}
+
+// 注意向后兼容别名：外部模块可能仍引用旧的 sharePeers/closeSharePeer/broadcastPeerLeave
+const sharePeers = meshPeers;
 
 // ============================================================
 //  自己的位置：进入页面即自动定位（同 App 端），显示自己的水滴标
@@ -801,82 +886,27 @@ async function joinView() {
   setViewStatus("正在连接…", false);
 
   try {
-    signaling = await connectSignaling("hereiam:" + code, onSignalView);
+    signaling = await connectSignaling("hereiam:" + code, onSignalMesh);
     setViewStatus("等待好友分享…", false);
     signaling.send({ type: "join", id: friendId });
-    startJoinTimer();
+    startJoinTimer();   // mesh 成员发现：周期广播 join，与房间内所有成员两两直连
+    hostId = null;      // 等待 host（分享者）的 join/profile 带 host:true 来识别
     updateUserSelector();   // 进入查看模式 → 显示「停止查看」项
   } catch (e) {
     setViewStatus("信令连接失败，请检查网络", false);
   }
 }
 
-// 停止查看：断开连接、移除好友定位标、回到空闲
+// 停止查看：发送 leave、断开所有连接、移除定位标、回到空闲（mesh 统一清理）
 function stopView() {
-  mode = "idle";
-  viewCode = null;
-  if (joinTimer) { clearInterval(joinTimer); joinTimer = null; }
-  // 先发 leave 通知分享端「我已退出」，分享端才能停止对该好友重连并清除定位标
+  // 先发 leave 通知房间内其他成员「我已退出」，对方清理连接并移除我的定位标
   if (signaling) { try { signaling.send({ type: "leave", id: friendId }); } catch (e) {} }
-  // 关闭语音对讲
+  // 关闭语音对讲（停麦克风 + 广播收声给对端）
   if (voice) { try { voice.disable(); } catch (e) {} }
-  hideVoice();
-  if (pc) { try { pc.close(); } catch (e) {} pc = null; dc = null; }
-  if (signaling) { try { signaling.close(); } catch (e) {} signaling = null; }
-  removeDriverMarker();
-  setIndicator(false);
+  handleRoomEnded();
   setViewStatus("已停止查看", false);
   $("viewPanel").style.display = "none";
   hideOverlay();
-  // 停止查看 → 自动跳回自己并刷新选择器（同安卓 App）
-  revertToMe();
-}
-
-function startJoinTimer() {
-  if (joinTimer) return;
-  joinTimer = setInterval(() => {
-    if (pc && pc.connectionState === "connected") {
-      clearInterval(joinTimer); joinTimer = null; return;
-    }
-    if (signaling) signaling.send({ type: "join", id: friendId });
-  }, 2000);
-}
-
-async function onSignalView(msg) {
-  // 信令为房间广播：offer/answer/candidate 均带目标好友 id，
-  // 必须忽略发给房间内其他查看者的消息——否则会把别人的 offer 误当语音重协商应答
-  // （用对方的 ICE 凭证 setRemoteDescription），导致自己的连接被破坏断线、房间互踢。
-  if ((msg.type === "offer" || msg.type === "answer" || msg.type === "candidate")
-      && msg.id && msg.id !== friendId) return;
-  if (msg.type === "offer") {
-    // 连接已建立且 stable 时收到的 offer = 对方发起的语音重协商 → 就地应答；
-    // 否则是全新的位置共享连接 offer → 走正常建连
-    if (pc && pc.connectionState === "connected" && pc.signalingState === "stable") {
-      await answerVoiceRenegotiation(voice, pc, signaling, msg.sdp, function (o) {
-        if (o) o.id = friendId; // 应答须带本端 friendId，安卓端认得出路由
-        if (signaling) { try { signaling.send(o); } catch (e) {} }
-      });
-    } else {
-      await handleOffer(msg.sdp);
-    }
-  } else if (msg.type === "answer") {
-    // 我方发起语音重协商后，对方返回 answer → 应用远端描述
-    if (pc) { try { await pc.setRemoteDescription(msg.sdp); } catch (e) {} }
-  } else if (msg.type === "candidate") {
-    if (pc) { try { await pc.addIceCandidate(msg.candidate); } catch (e) {} }
-  } else if (msg.type === "bye") {
-    setViewStatus("对方已结束共享，可关闭", false);
-    setIndicator(false);
-    mode = "idle";
-    viewCode = null;
-    if (joinTimer) { clearInterval(joinTimer); joinTimer = null; }
-    if (voice) { try { voice.reset(); } catch (e) {} }
-    hideVoice();
-    if (pc) { try { pc.close(); } catch (e) {} pc = null; dc = null; }
-    removeDriverMarker();
-    // 对方结束共享 → 自动跳回自己并刷新选择器
-    revertToMe();
-  }
 }
 
 // 移除分享者定位标（对方结束共享 / 停止查看时调用）
@@ -988,61 +1018,6 @@ function clearCoViews() {
   coViews.forEach((cv) => { if (cv.marker) { try { cv.marker.setMap(null); } catch (e) {} } });
   coViews.clear();
   if (followCoviewId()) revertToMe();   // 正跟随某位协作者 → 跳回自己
-}
-
-async function handleOffer(offer) {
-  if (pc) { try { pc.close(); } catch (e) {} }
-  pc = new RTCPeerConnection({ iceServers: CONFIG.stunServers });
-  // 接收分享者的音频轨道（语音对讲）
-  if (voice) pc.ontrack = (e) => { try { voice.handleRemoteTrack(e); } catch (err) {} };
-  pc.onicecandidate = (e) => {
-    if (e.candidate && signaling)
-      signaling.send({ type: "candidate", candidate: e.candidate, id: friendId });
-  };
-  pc.ondatachannel = (e) => {
-    dc = e.channel;
-    dc.onopen = () => {
-      // 连接建立后把自己的资料（用户名+头像）推送给分享者（安卓端显示）
-      sendMyProfile();
-      // 新连接：重置语音状态并亮出对讲按钮
-      if (voice) { try { voice.reset(); } catch (e) {} }
-      showVoice();
-    };
-    dc.onmessage = (ev) => {
-      let m;
-      try { m = JSON.parse(ev.data); } catch (e) { return; }
-      if (m && m.type === "profile") {
-        if (m.friendId) setCoViewProfile(m.friendId, m.name, m.avatar);   // 房间内其他查看者
-        else setDriverProfile(m.name, m.avatar);                          // 共享者本人
-      } else if (m && m.type === "voice") {
-        // 语音对讲控制消息（静音/说话中/关闭）
-        if (voice) { try { voice.handleControl(m); } catch (e) {} }
-      } else if (m && m.type === "leave" && m.friendId) {
-        removeCoView(m.friendId);   // 房间内其他查看者离开
-      } else if (m && m.lat !== undefined) {
-        if (m.friendId) showCoView(m.friendId, m);   // 房间内其他查看者的位置
-        else onLocation(m);                          // 共享者本人的位置
-      }
-    };
-  };
-  pc.onconnectionstatechange = () => {
-    if (!pc) return;
-    const st = pc.connectionState;
-    if (st === "connected") {
-      setViewStatus("已点对点直连", true);
-      setIndicator(true);
-      showVoice(); // 点对点直连后才显示语音对讲入口
-    } else if (st === "disconnected" || st === "failed") {
-      setViewStatus("连接中断，正在自动重连…", false);
-      setIndicator(false);
-      hideVoice();
-      startJoinTimer();
-    }
-  };
-  await pc.setRemoteDescription(offer);
-  const answer = await pc.createAnswer();
-  await pc.setLocalDescription(answer);
-  signaling.send({ type: "answer", sdp: answer, id: friendId });
 }
 
 // 收到分享者位置（WGS-84）→ 转 GCJ-02 后在地图上显示水滴标记
@@ -1552,31 +1527,25 @@ function initCompass() {
   }
 }
 
-// 把「我」的资料（用户名 + 头像）推送给指定好友（连接建立时）
+// 把「我」的资料（用户名 + 头像）推送给指定成员（连接建立时；host 标记便于对方识别分享者）
 function sendProfileToFid(fid) {
-  const p = sharePeers.get(fid);
+  const p = meshPeers.get(fid);
   if (!p || !p.dc || p.dc.readyState !== "open") return;
   try {
     const me = getUserProfile();
-    const msg = { type: "profile", name: me.name };
+    const msg = { type: "profile", name: me.name, host: mode === "share" };
     if (me.avatar) msg.avatar = me.avatar;
     p.dc.send(JSON.stringify(msg));
   } catch (e) {}
 }
 
-// 把自己的资料（用户名 + 头像）广播给当前所有对端（分享端=每个好友；查看端=单连接）
+// 把自己的资料（用户名 + 头像）广播给当前所有对端（mesh：分享端/查看端都发给房间全部成员）
 function sendMyProfile() {
   try {
     const p = getUserProfile();
-    const msg = { type: "profile", name: p.name };
+    const msg = { type: "profile", name: p.name, host: mode === "share" };
     if (p.avatar) msg.avatar = p.avatar;
-    if (mode === "share") {
-      sharePeers.forEach((peer) => {
-        if (peer.dc && peer.dc.readyState === "open") { try { peer.dc.send(JSON.stringify(msg)); } catch (e) {} }
-      });
-    } else if (dc && dc.readyState === "open") {
-      dc.send(JSON.stringify(msg));
-    }
+    sendToAll(msg);
   } catch (e) {}
 }
 // 用户中心修改资料后：刷新自己的定位标头像 + 重发 profile 给对端
@@ -1585,21 +1554,23 @@ onUserProfileChanged = function () {
   sendMyProfile();
 };
 
-// 立即把当前自己的位置回传给对端（对称协议：一律发 WGS-84，接收端统一转 GCJ-02）
-// 分享端广播给所有好友；查看端发给单连接。
+// 广播 JSON 给所有已直连成员
+function sendToAll(obj) {
+  const json = JSON.stringify(obj);
+  meshPeers.forEach((p) => {
+    if (p.dc && p.dc.readyState === "open") { try { p.dc.send(json); } catch (e) {} }
+  });
+}
+
+// 立即把当前自己的位置广播给所有对端（mesh 对称协议：带 friendId=发送者，接收端统一转 GCJ-02）
 function sendMyLocationNow() {
   if (!myPos) return;
-  const msg = (mode === "view")
-    ? { type: "loc", lat: myPos.lat, lng: myPos.lng, heading: myPos.heading, acc: myPos.acc, t: Date.now(), gray: myPos.gray }
-    : myPos;   // share：直接广播 myPos（含 type:"loc" + gray 字段）
-  const json = JSON.stringify(msg);
-  if (mode === "share") {
-    sharePeers.forEach((peer) => {
-      if (peer.dc && peer.dc.readyState === "open") { try { peer.dc.send(json); } catch (e) {} }
-    });
-  } else if (dc && dc.readyState === "open") {
-    try { dc.send(json); } catch (e) {}
-  }
+  const msg = {
+    type: "loc", friendId: friendId,
+    lat: myPos.lat, lng: myPos.lng, heading: myPos.heading,
+    acc: myPos.acc, t: Date.now(), gray: myPos.gray,
+  };
+  sendToAll(msg);
 }
 
 function copyText(text) {
@@ -1657,30 +1628,27 @@ function bindEvents() {
   window.addEventListener("beforeunload", () => {
     if (myWatchId != null) navigator.geolocation.clearWatch(myWatchId);
     if (joinTimer) clearInterval(joinTimer);
-    // 尽力通知分享端我已退出（关页时 Ably 发送不一定来得及，安卓端另有重连超时兜底）
-    if (mode !== "share" && signaling) { try { signaling.send({ type: "leave", id: friendId }); } catch (e) {} }
-    if (mode === "share") {
-      sharePeers.forEach((p) => { try { if (p.pc) p.pc.close(); } catch (e) {} });
-      sharePeers.clear();
-    } else if (pc) {
-      try { pc.close(); } catch (e) {}
+    // 尽力通知房间内其他成员我已退出（host 发 bye 解散；成员发 leave；关页时 Ably 发送不一定来得及，对端另有超时兜底）
+    if (signaling) {
+      try { signaling.send({ type: mode === "share" ? "bye" : "leave", id: friendId }); } catch (e) {}
     }
+    meshPeers.forEach((p) => { try { if (p.pc) p.pc.close(); } catch (e) {} });
+    meshPeers.clear();
     if (signaling) { try { signaling.close(); } catch (e) {} }
   });
 }
 
 // 语音对讲：创建控制器并绑定 UI（点对点连接后才显示按钮）
-// 分享端：控制器内部上报「当前所有好友连接」，语音广播给房间内每位查看者（多人房间，同安卓端）；
-// 查看端：仍为单一连接。
+// mesh：控制器返回房间内当前所有连接（分享端/查看端都是多连接），
+// 语音轨挂到每条连接、每条连接的远端音轨分路播放 → 人人互听（同安卓端 mesh）。
 voice = createVoiceController(() => {
-  if (mode === "share") {
-    const arr = [];
-    sharePeers.forEach((p) => { if (p.pc) arr.push({ pc: p.pc, dc: p.dc, signaling: signaling, id: p.friendId }); });
-    return arr;
-  }
-  return { pc: pc, dc: dc, signaling: signaling };
+  const arr = [];
+  meshPeers.forEach((p, pid) => {
+    if (p.pc) arr.push({ pc: p.pc, dc: p.dc, signaling: signaling, id: pid });
+  });
+  return arr;
 });
-voice.friendId = friendId; // 语音重协商 offer 须携带本端 friendId，安卓端才认得出并正确路由
+voice.friendId = friendId; // 语音重协商 offer 须携带本端 friendId（发送者标识），对端按 to 路由
 bindVoiceUI(voice);
 
 initMap();

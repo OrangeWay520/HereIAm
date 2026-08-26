@@ -26,7 +26,8 @@ function createVoiceController(getConn) {
     muted: false,                  // 本机静音
     remoteTalking: false,          // 对方当前是否在说话
     remoteMuted: false,            // 对方是否已静音
-    remoteAudio: null,             // 远端音频播放元素
+    remoteAudio: null,             // 远端音频播放元素（旧单连接兼容）
+    remoteAudios: new Map(),       // pc -> 独立播放元素（mesh 多连接每路一播，互不覆盖）
     sentSpeaking: null,            // 上次已上报的 speaking 状态
     micError: null,                // 上次麦克风错误提示
     renegotiating: false,          // 正在重协商，防止并发
@@ -112,10 +113,10 @@ function createVoiceController(getConn) {
     return conn.pc.createOffer().then(function (offer) {
       return conn.pc.setLocalDescription(offer);
     }).then(function () {
-      // 必须携带 id(=friendId)，安卓端才认得出该 offer 来自哪位好友并正确路由
+      // 信令协议（mesh）：id=发送者(friendId)，to=目标连接对端(nodeId)。两端据此路由到对应 peer。
       var msg = { type: "offer", sdp: conn.pc.localDescription };
-      var id = (conn && conn.id) || v.friendId;
-      if (id) msg.id = id;
+      msg.id = v.friendId || "";
+      if (conn && conn.id) msg.to = conn.id;
       conn.signaling.send(msg);
     }).then(function () {
       v.renegotiating = false;
@@ -251,27 +252,50 @@ function createVoiceController(getConn) {
   };
 
   // ---------- 处理远端音频轨道（放到 pc.ontrack） ----------
+  // mesh 多连接：以 pc 为键为每条连接创建独立播放元素，多路语音同时外放互不覆盖；
+  // 找不到 pc 时回退到旧单连接行为（单 audio 元素）。
   v.handleRemoteTrack = function (event) {
     if (!event || !event.track) return;
-    var stream = event.streams && event.streams[0];
-    if (!stream) stream = new MediaStream([event.track]);
-    if (!v.remoteAudio) {
-      v.remoteAudio = new Audio();
-      v.remoteAudio.autoplay = true;
-      v.remoteAudio.playsInline = true;
-      v.remoteAudio.style.display = "none";
-      document.body.appendChild(v.remoteAudio);
+    var pcRef = event.target || null;
+    var audio = (pcRef && v.remoteAudios.get(pcRef)) || null;
+    if (!audio) {
+      audio = new Audio();
+      audio.autoplay = true;
+      audio.playsInline = true;
+      audio.style.display = "none";
+      audio._ms = new MediaStream();   // 该连接上收集到的远端音轨集合
+      document.body.appendChild(audio);
+      if (pcRef) v.remoteAudios.set(pcRef, audio);
     }
-    v.remoteAudio.srcObject = stream;
-    v.remoteAudio.volume = 1;
-    v.remoteAudio.play().catch(function () {});
+    // 把 event 中的音轨并入该连接的流（避免重复添加同一 track）
+    var addTrackDedup = function (tr) {
+      if (!tr) return;
+      for (var j = 0; j < audio._ms.getTracks().length; j++) {
+        if (audio._ms.getTracks()[j].id === tr.id) return;
+      }
+      try { audio._ms.addTrack(tr); } catch (e) {}
+    };
+    if (event.streams && event.streams[0]) {
+      event.streams[0].getAudioTracks().forEach(addTrackDedup);
+    } else {
+      addTrackDedup(event.track);
+    }
+    audio.srcObject = audio._ms;
+    audio.volume = 1;
+    audio.play().catch(function () {});
     if (v.onRemote) v.onRemote();
   };
 
   // ---------- 远端音频不可用/断连时清理 ----------
   v.stopRemoteAudio = function () {
+    v.remoteAudios.forEach(function (audio) {
+      try { audio.pause(); audio.srcObject = null; } catch (e) {}
+      try { if (audio.parentNode) audio.parentNode.removeChild(audio); } catch (e) {}
+    });
+    v.remoteAudios.clear();
     if (v.remoteAudio) {
       try { v.remoteAudio.pause(); v.remoteAudio.srcObject = null; } catch (e) {}
+      v.remoteAudio = null;
     }
     v.remoteTalking = false;
     v.remoteMuted = false;
@@ -280,8 +304,11 @@ function createVoiceController(getConn) {
 
   // ---------- 在用户手势里激活远端音频 ----------
   // 浏览器会拦截非用户手势的自动播放（带声音）——拿到麦克风/点按对讲键本身也是用户手势，
-  // 这里顺带 resume 远端音频，保证"听到对方声音"不再被自动播放策略拦下。
+  // 这里顺带 resume 所有远端音频，保证"听到对方声音"不再被自动播放策略拦下。
   v.resumePlayback = function () {
+    v.remoteAudios.forEach(function (audio) {
+      try { audio.play().catch(function () {}); } catch (e) {}
+    });
     if (v.remoteAudio) {
       try { v.remoteAudio.play().catch(function () {}); } catch (e) {}
     }
