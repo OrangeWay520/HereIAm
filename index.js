@@ -348,7 +348,8 @@ function handleSharePeerData(fid, m) {
     setCoViewProfile(fid, m.name, m.avatar);   // 分享者自己的地图上也显示
     updateUserSelector();
   } else if (m && m.type === "voice") {
-    // 语音对讲控制消息（静音/说话中/关闭）
+    // 语音对讲控制消息（静音/说话中/关闭）：中继给房间内其他查看者，让大家的说话状态同步
+    relayToOthers(fid, m);
     if (voice) { try { voice.handleControl(m); } catch (e) {} }
   } else if (m && m.type === "leave") {
     // 本连接主动收到对方 leave 属异常，忽略（leave 由分享者侧在断开时统一下发）
