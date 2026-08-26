@@ -838,6 +838,11 @@ function startJoinTimer() {
 }
 
 async function onSignalView(msg) {
+  // 信令为房间广播：offer/answer/candidate 均带目标好友 id，
+  // 必须忽略发给房间内其他查看者的消息——否则会把别人的 offer 误当语音重协商应答
+  // （用对方的 ICE 凭证 setRemoteDescription），导致自己的连接被破坏断线、房间互踢。
+  if ((msg.type === "offer" || msg.type === "answer" || msg.type === "candidate")
+      && msg.id && msg.id !== friendId) return;
   if (msg.type === "offer") {
     // 连接已建立且 stable 时收到的 offer = 对方发起的语音重协商 → 就地应答；
     // 否则是全新的位置共享连接 offer → 走正常建连
