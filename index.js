@@ -22,6 +22,8 @@ let shareCode = null;          // 房间口令（我是创建者）
 let viewCode = null;           // 房间口令（我是加入者）
 let joinTimer = null;          // 周期广播 join 定时器（share/view 共用，mesh 成员发现）
 let voice = null;              // 语音对讲控制器（createVoiceController 创建）
+let sawRoomPeer = false;       // 加入查看时是否收到过任何对方成员响应（判定"房间是否存在/是否已关闭"）
+let roomNoPeerTimer = null;    // 加入空房间判定定时器
 
 // 自己的位置（进入页面即自动定位，同 App 端）
 let myWatchId = null;           // 自己的定位 watch
@@ -251,9 +253,12 @@ function startView() {
 }
 
 function stopShare() {
-  // 退出房间：只是自己离开，不解散房间（管理员权按加入顺序移交给下一人）
-  // 通知房间内其他成员我已退出，对方清理连接并移除我的定位标
-  if (signaling) { try { signaling.send({ type: "leave", id: friendId }); } catch (e) {} }
+  // 退出房间：若房间内还有其他已直连成员 → 仅发 leave（自己离开，房间保留，可凭原口令重进）；
+  // 若房间已无人（空房）→ 发 bye 关闭房间，避免他人加入一个空房间。
+  const hasPeer = meshAnyConnected();
+  if (signaling) {
+    try { signaling.send({ type: hasPeer ? "leave" : "bye", id: friendId }); } catch (e) {}
+  }
   // 关闭语音对讲（停麦克风 + 广播收声给对端）
   if (voice) { try { voice.disable(); } catch (e) {} }
   handleRoomEnded();
@@ -453,6 +458,7 @@ async function onSignalMesh(msg) {
   if (msg.to && msg.to !== friendId) return;
   if (msg.type === "join") {
     const them = msg.id; if (!them || them === friendId) return;
+    sawRoomPeer = true;                         // 收到其他成员 join → 房间有人，非空房间
     if (mode === "view" && msg.host) adoptHost(them);   // 记录分享者（host），转主定位标
     if (meshPeers.has(them)) return;                    // 已连接/连接中
     // 维护名义加入顺序（仅记录，管理员判定用 min-nodeId，确定性一致）
@@ -507,6 +513,8 @@ async function handleMeshOffer(them, sdp) {
 // 房间结束（host 发 bye / 我方主动停止）：统一清理全部连接与 UI
 function handleRoomEnded() {
   stopJoinTimer();
+  if (roomNoPeerTimer) { clearTimeout(roomNoPeerTimer); roomNoPeerTimer = null; }
+  sawRoomPeer = false;
   meshPeers.forEach((p) => closeMeshPeer(p.peerId));
   meshPeers.clear();
   if (signaling) { try { signaling.close(); } catch (e) {} signaling = null; }
@@ -937,9 +945,29 @@ async function joinView() {
     setRoomStatus("已加入……正在同步成员状态…", false);
     showRoomPanel();     // 统一房间面板
     updateUserSelector();
+    // 空房间判定：一段时间内房间若无任何成员响应（无人/房间已关闭/口令无效），给出提示并退出
+    startRoomNoPeerCheck();
   } catch (e) {
     setViewStatus("信令连接失败，请检查网络", false);
   }
+}
+
+// 加入后启动空房间判定：若 N 秒内没收到任何对方成员（join/offer/资料/位置），判定房间不存在或已关闭
+function startRoomNoPeerCheck() {
+  sawRoomPeer = false;
+  if (roomNoPeerTimer) { clearTimeout(roomNoPeerTimer); roomNoPeerTimer = null; }
+  roomNoPeerTimer = setTimeout(() => {
+    roomNoPeerTimer = null;
+    if (mode !== "view") return;
+    if (sawRoomPeer) return;               // 收到过任何对方响应 → 房间有效，无需处理
+    // 房间无人响应：判定不存在/已关闭，发 leave 并清理
+    if (signaling) { try { signaling.send({ type: "leave", id: friendId }); } catch (e) {} }
+    if (voice) { try { voice.disable(); } catch (e) {} }
+    handleRoomEnded();
+    setViewStatus("没有这个房间，或房间已关闭", false);
+    $("viewPanel").style.display = "block";
+    hideOverlay();
+  }, 7000);
 }
 
 // 退出房间：发送 leave、断开所有连接、移除定位标、回到空闲（mesh 统一清理）
