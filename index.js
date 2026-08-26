@@ -166,6 +166,7 @@ function onHiaClick() {
   }
   if (mode === "view") {
     // 正在查看他人 → 直接弹出「查看他人位置」窗口（显示正在查看状态，不加遮罩）
+    $("viewPanel").style.display = "block";
     showViewPanel(true);
     return;
   }
@@ -784,6 +785,78 @@ function removeDriverMarker() {
   driverWdp = null;
   driverStroke = null;
   hasCentered = false;
+  clearCoViews();   // 一并清理房间内其他查看者的定位标
+}
+
+// ========== 房间内其他查看者：多定位标（共享者中继，带 friendId） ==========
+// 当网页端作为查看者并加入一个多人位置共享房间时，共享者会把"其他查看者"的位置/资料
+// 中继过来，这里为其各自创建一个水滴定位标（而不是和共享者本人的定位标混在一起）。
+let coViews = new Map();   // friendId -> cv
+
+// 显示/更新某位房间内其他查看者的定位标
+function showCoView(fid, m) {
+  if (!map) return;
+  const [lng, lat] = wgs84ToGcj02(m.lng, m.lat);
+  const pos = new AMap.LngLat(lng, lat);
+  let cv = coViews.get(fid);
+  if (!cv) { cv = { name: null, avatarData: null, marker: null }; coViews.set(fid, cv); }
+  if (!cv.marker) {
+    const created = createDriverMarker(pos, m.heading != null ? m.heading : null);
+    cv.marker = created.marker;
+    cv.arrowG = created.arrowG;
+    cv.avatarImg = created.avatarImg;
+    cv.nameEl = created.nameEl;
+    cv.glowPath = created.glowPath;
+    cv.ptrPath = created.ptrPath;
+    cv.discPath = created.discPath;
+    cv.wdp = created.wdp;
+    cv.strokeCircle = created.strokeCircle;
+    map.add(cv.marker);
+    applyCoProfile(cv);
+  } else {
+    cv.marker.setPosition(pos);
+    updateArrowG(cv.arrowG, m.heading != null ? m.heading : null);
+  }
+  setCoLocated(cv, !!m.gray);
+}
+
+function setCoLocated(cv, gray) {
+  const rgb = gray ? "154,163,175" : "47,134,246";
+  if (cv.glowPath) cv.glowPath.setAttribute("stroke", "rgba(" + rgb + ",0.28)");
+  if (cv.ptrPath) cv.ptrPath.setAttribute("fill", "rgba(" + rgb + ",0.96)");
+  if (cv.discPath) cv.discPath.setAttribute("fill", "rgba(" + rgb + ",0.96)");
+}
+
+// 接收某位房间内其他查看者的资料（名字/头像）
+function setCoViewProfile(fid, name, avatar) {
+  if (!coViews.has(fid)) { coViews.set(fid, { name: name || null, avatarData: avatar || null, marker: null }); return; }
+  const cv = coViews.get(fid);
+  if (name) cv.name = name;
+  if (avatar) cv.avatarData = avatar;
+  applyCoProfile(cv);
+}
+
+function applyCoProfile(cv) {
+  if (!cv || !cv.marker) return;
+  if (cv.name && cv.nameEl) { cv.nameEl.textContent = cv.name; cv.nameEl.style.display = "block"; }
+  if (cv.avatarData && cv.avatarImg) {
+    cv.avatarImg.setAttribute("href", cv.avatarData);
+    cv.avatarImg.setAttributeNS("http://www.w3.org/1999/xlink", "xlink:href", cv.avatarData);
+    cv.avatarImg.style.display = "block";
+  }
+}
+
+// 某位房间内其他查看者离开 → 移除其定位标
+function removeCoView(fid) {
+  const cv = coViews.get(fid);
+  if (!cv) { coViews.delete(fid); return; }
+  if (cv.marker) { try { cv.marker.setMap(null); } catch (e) {} }
+  coViews.delete(fid);
+}
+
+function clearCoViews() {
+  coViews.forEach((cv) => { if (cv.marker) { try { cv.marker.setMap(null); } catch (e) {} } });
+  coViews.clear();
 }
 
 async function handleOffer(offer) {
@@ -808,12 +881,16 @@ async function handleOffer(offer) {
       let m;
       try { m = JSON.parse(ev.data); } catch (e) { return; }
       if (m && m.type === "profile") {
-        setDriverProfile(m.name, m.avatar);
+        if (m.friendId) setCoViewProfile(m.friendId, m.name, m.avatar);   // 房间内其他查看者
+        else setDriverProfile(m.name, m.avatar);                          // 共享者本人
       } else if (m && m.type === "voice") {
         // 语音对讲控制消息（静音/说话中/关闭）
         if (voice) { try { voice.handleControl(m); } catch (e) {} }
+      } else if (m && m.type === "leave" && m.friendId) {
+        removeCoView(m.friendId);   // 房间内其他查看者离开
       } else if (m && m.lat !== undefined) {
-        onLocation(m);
+        if (m.friendId) showCoView(m.friendId, m);   // 房间内其他查看者的位置
+        else onLocation(m);                          // 共享者本人的位置
       }
     };
   };
