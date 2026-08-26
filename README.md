@@ -4,8 +4,8 @@ HereIAm 是一个**点对点实时位置共享**网页应用。无需注册账�
 
 ## 🌐 在线体验
 
-- **GitHub Pages**：https://orangeway520.github.io/HereIAm/
-- **EdgeOne Pages**：https://hereiam.orangeway.top/
+- **EdgeOne Pages（推荐）**：https://hereiam.orangeway.top/
+- **GitHub Pages（备用）**：https://orangeway520.github.io/HereIAm/
 
 ## ✨ 功能特性
 
