@@ -434,6 +434,11 @@ function closeMeshPeer(peerId) {
 // 某成员离开：清理连接 + 移除其定位标
 function leaveMeshPeer(peerId) {
   closeMeshPeer(peerId);
+  // 若离开的是当前被查看者（host/创建者），一并移除其主定位标（room 会话保留，其他人仍可看）
+  if (peerId === hostId) {
+    hostId = null;
+    removeDriverMarker();
+  }
   removeCoView(peerId);
   updateUserSelector();
   updateConnectedStatus();
