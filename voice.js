@@ -360,17 +360,34 @@ function bindVoiceUI(v) {
     render();
   }
 
-  // 长按 = 按键说话；松开即停
+  // 长按 = 按键说话；松开即停（与手机端一致）。
+  // 注意：长按松手后浏览器仍会派发一个 click，若不区分，会把模式误切到「免提持续」而一直说话，
+  // 表现为「松手不关闭」。这里用按住时长阈值区分长按与单击：长按松手 → 抑制随后的 click。
+  var HOLD_MS = 350;
   var holding = false;
+  var longPressed = false;   // 本次按压是否属于长按（按住超过阈值）
+  var holdTimer = null;
   btn.addEventListener("pointerdown", function (e) {
     v.resumePlayback();   // 用户手势：顺带激活远端音频播放（绕过自动播放拦截）
+    holding = true;
+    longPressed = false;
+    if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
     if (v.enabled && v.mode === "ptt") {
       if (e.preventDefault) e.preventDefault();
-      holding = true;
-      v.setPtt(true);
+      v.setPtt(true);   // 立即说话
     }
+    // 按住超过阈值仍没松手 → 判定为长按（只有真正在「按住说话」才算）
+    holdTimer = setTimeout(function () {
+      if (holding && v.enabled && v.mode === "ptt") longPressed = true;
+    }, HOLD_MS);
   });
-  var release = function () { if (holding) { holding = false; v.setPtt(false); } };
+  var release = function () {
+    if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+    if (!holding) return;
+    holding = false;
+    if (v.enabled && v.mode === "ptt") v.setPtt(false);   // 松手即停
+    if (longPressed) { longPressed = false; btn._suppressClick = true; }   // 抑制随后 click 的换模式
+  };
   btn.addEventListener("pointerup", release);
   btn.addEventListener("pointerleave", release);
   btn.addEventListener("pointercancel", release);
@@ -378,6 +395,7 @@ function bindVoiceUI(v) {
   // 单击：未开启 → 开启语音（默认按键模式）；已开启 → 切换 按键/免提持续 模式。
   // 不再弹设置浮层，与手机端交互一致：长按=说话、单击=切换持续说话。
   btn.addEventListener("click", function () {
+    if (btn._suppressClick) { btn._suppressClick = false; return; }   // 长按松手 → 忽略本次单击
     v.resumePlayback();   // 用户手势：顺带激活远端音频播放
     if (!v.enabled) {
       v.enable().then(function () { render(); }).catch(function () { render(); });
