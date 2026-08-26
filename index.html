@@ -399,61 +399,52 @@
   <!-- 选择面板 -->
   <div class="sheet" id="sheet" style="display:none">
     <div class="sheet-title">你想做什么？</div>
-    <div class="sheet-sub">选择一个操作开始使用</div>
+    <div class="sheet-sub">创建一个位置分享房间，或加入好友的房间</div>
     <div class="sheet-option" id="optShare">
       <div class="opt-icon share">↗</div>
       <div>
-        <div class="opt-title">分享我的位置</div>
-        <div class="opt-sub">生成口令，让好友实时查看你的位置</div>
+        <div class="opt-title">创建位置分享</div>
+        <div class="opt-sub">新建房间，邀请好友实时共享位置</div>
       </div>
     </div>
     <div class="sheet-option" id="optView">
       <div class="opt-icon view">◎</div>
       <div>
-        <div class="opt-title">查看他人位置</div>
-        <div class="opt-sub">输入口令，查看好友的实时位置</div>
+        <div class="opt-title">加入位置分享</div>
+        <div class="opt-sub">输入口令，加入好友的位置分享房间</div>
       </div>
     </div>
   </div>
 
-  <!-- 分享面板 -->
+  <!-- 房间面板（创建者/加入者统一；仅管理员多「解散房间」） -->
   <div class="panel" id="sharePanel" style="display:none">
     <div class="panel-header">
-      <span class="panel-title">分享我的位置</span>
+      <span class="panel-title">位置分享房间</span>
       <span class="panel-close" id="shareClose">✕</span>
     </div>
-    <div class="panel-label">分享口令（点击可复制）</div>
+    <div class="panel-label">房间口令（点击可复制）</div>
     <div class="share-code" id="code">------</div>
-    <div class="share-hint">把链接或口令发给好友</div>
+    <div class="share-hint">把链接或口令发给好友，实时共享位置</div>
     <div class="share-qr"><img id="qrcode" alt="二维码"></div>
     <div class="share-actions">
       <button class="btn-outline" id="copyBtn">复制口令</button>
       <button class="btn-outline" id="linkBtn">复制链接</button>
     </div>
     <div class="status" id="status"></div>
-    <button class="btn-stop" id="stopBtn" style="display:none">停止共享</button>
+    <button class="btn-stop" id="dissolveBtn" style="display:none">解散房间</button>
+    <button class="btn-stop" id="stopBtn" style="display:none">退出房间</button>
   </div>
 
-  <!-- 查看面板 -->
+  <!-- 加入面板（输入口令，加入前） -->
   <div class="panel" id="viewPanel" style="display:none">
     <div class="panel-header">
-      <span class="panel-title">查看他人位置</span>
+      <span class="panel-title">加入位置分享</span>
       <span class="panel-close" id="viewClose">✕</span>
     </div>
-    <!-- 正在查看：显示口令 + 停止 -->
-    <div id="viewingSection" style="display:none">
-      <div class="panel-label">正在查看口令</div>
-      <div class="share-code" id="viewingCode">------</div>
-      <div class="status" id="viewingStatus"></div>
-      <button class="btn-stop" id="stopViewBtn">停止查看</button>
-    </div>
-    <!-- 输入口令 -->
-    <div id="inputSection">
-      <div class="panel-label">请输入好友分享的口令</div>
-      <input class="code-input" id="viewCode" type="tel" maxlength="6" placeholder="6 位口令">
-      <button class="btn-primary" id="joinBtn" disabled>开始查看</button>
-      <div class="status" id="viewStatus"></div>
-    </div>
+    <div class="panel-label">请输入好友分享的口令</div>
+    <input class="code-input" id="viewCode" type="tel" maxlength="6" placeholder="6 位口令">
+    <button class="btn-primary" id="joinBtn" disabled>加入房间</button>
+    <div class="status" id="viewStatus"></div>
   </div>
 
   <!-- 用户中心 -->
@@ -499,6 +490,6 @@
   <script src="signaling.js?v=20260816b"></script>
   <script src="user.js?v=20260816a"></script>
   <script src="voice.js?v=20260826c"></script>
-  <script src="index.js?v=20260827b"></script>
+  <script src="index.js?v=20260827c"></script>
 </body>
 </html>

@@ -15,9 +15,11 @@ let signaling = null;
 // 房间成员两两直连（id 字典序小者发起 offer），位置/资料/语音点对点直达，不再区分分享端/查看端。
 // host（房间创建者）与成员地位平等；host 额外广播 host:true 供成员识别「分享者」水滴。
 let meshPeers = new Map();     // nodeId -> {pc, dc, connected, name, avatarData, offerer, haveLocalOffer}
-let hostId = null;             // 房间创建者（分享者）的 nodeId；网页端自己是 host 时 = friendId
-let shareCode = null;          // 分享口令（我是 host）
-let viewCode = null;           // 正在查看的口令（我是成员）
+let hostId = null;             // 房间创建者的 nodeId；用于识别「分享者」水滴（身份标记）
+let roomAdminId = null;        // 当前管理员（可解散房间者）的 nodeId；初始=创建者，按加入顺序移交
+let adminOrder = [];           // 房间成员加入顺序（nodeId 数组），用于管理员移交
+let shareCode = null;          // 房间口令（我是创建者）
+let viewCode = null;           // 房间口令（我是加入者）
 let joinTimer = null;          // 周期广播 join 定时器（share/view 共用，mesh 成员发现）
 let voice = null;              // 语音对讲控制器（createVoiceController 创建）
 
@@ -167,20 +169,14 @@ function hideAllPanels() {
 }
 
 function onHiaClick() {
-  // 已有面板打开 → 关闭；否则按当前模式直接弹出对应窗口
+  // 已有面板打开 → 关闭；否则按当前模式直接弹出统一房间面板
   const anyOpen = $("sheet").style.display !== "none" ||
                   $("sharePanel").style.display !== "none" ||
                   $("viewPanel").style.display !== "none";
   if (anyOpen) { hideAllPanels(); return; }
-  if (mode === "share") {
-    // 正在共享 → 直接弹出「分享我的位置」窗口（不加遮罩，保持地图可见可用）
-    $("sharePanel").style.display = "block";
-    return;
-  }
-  if (mode === "view") {
-    // 正在查看他人 → 直接弹出「查看他人位置」窗口（显示正在查看状态，不加遮罩）
-    $("viewPanel").style.display = "block";
-    showViewPanel(true);
+  if (mode === "share" || mode === "view") {
+    // 已加入房间（创建者/加入者统一面板）：显示房间口令+状态，不加遮罩保持地图可用
+    showRoomPanel();
     return;
   }
   // 空闲 → 弹出选择面板，配遮罩
@@ -188,38 +184,90 @@ function onHiaClick() {
   $("sheet").style.display = "block";
 }
 
-// 查看面板双态：true=正在查看（口令+停止），false=输入口令
-function showViewPanel(isViewing) {
-  $("inputSection").style.display = isViewing ? "none" : "block";
-  $("viewingSection").style.display = isViewing ? "block" : "none";
-  if (isViewing && viewCode) $("viewingCode").textContent = viewCode;
+// 统一房间面板：创建者/加入者内容一致，仅管理员多「解散房间」
+function showRoomPanel() {
+  const roomCode = shareCode || viewCode || "";
+  $("code").textContent = roomCode || "------";
+  if (roomCode) {
+    const link = shareLink(roomCode);
+    $("qrcode").src =
+      "https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=" +
+      encodeURIComponent(link);
+  }
+  refreshDissolveBtn();
+  $("sharePanel").style.display = "block";
+  setRoomStatus(roomStatusText(), false);
+}
+
+// 当前管理员（可解散房间者）：在线成员中 nodeId 最小者。
+// 确定性规则，各端（web/android）判定完全一致；当前管理员退出后自动移交次小者，符合「人人平等 + 管理权移交」。
+function computeAdmin() {
+  const ids = [friendId];
+  meshPeers.forEach((_, pid) => ids.push(pid));
+  ids.sort();
+  const a = ids[0] || null;
+  roomAdminId = a;
+  return a;
+}
+
+// 刷新「解散房间」按钮显隐：仅当前管理员可见
+function refreshDissolveBtn() {
+  const el = $("dissolveBtn");
+  if (!el) return;
+  el.style.display = (computeAdmin() === friendId) ? "block" : "none";
+}
+
+// 房间面板状态文本：当前多少人在线
+function roomStatusText() {
+  const n = meshPeers.size + 1; // 加上自己
+  return n > 1 ? "房间内 " + n + " 人在共享位置" : "等待好友加入房间…";
+}
+
+// 统一房间面板状态（写入 #status）
+function setRoomStatus(text, on) {
+  const el = $("status");
+  if (!el) return;
+  el.textContent = text;
+  el.className = "status" + (on ? " on" : "");
 }
 
 function startShare() {
   $("sheet").style.display = "none";
-  $("sharePanel").style.display = "block";
   hideOverlay(); // 进入共享后不再用遮罩压住地图与 HIA 键
   if (!shareCode) {
     shareCode = genCode();
+    adminOrder = [friendId];   // 名义加入顺序：创建者最先
     initShare(shareCode);
   }
+  showRoomPanel();
   updateUserSelector();
 }
 
 function startView() {
   $("sheet").style.display = "none";
   hideOverlay(); // 进入查看后同样不压遮罩
-  showViewPanel(false);
   $("viewPanel").style.display = "block";
+  $("viewStatus").textContent = "";
 }
 
 function stopShare() {
-  // 注意：不清除 myWatchId —— 全局定位持续运行，地图继续显示自己的定位标
-  // 先发 bye 通知所有对端「分享已结束」，对方停止重连并清除定位标
-  if (signaling) { try { signaling.send({ type: "bye" }); } catch (e) {} }
-  // 广播语音关闭（停麦克风 + 收声），再统一清理（host 解散房间）
+  // 退出房间：只是自己离开，不解散房间（管理员权按加入顺序移交给下一人）
+  // 通知房间内其他成员我已退出，对方清理连接并移除我的定位标
+  if (signaling) { try { signaling.send({ type: "leave", id: friendId }); } catch (e) {} }
+  // 关闭语音对讲（停麦克风 + 广播收声给对端）
   if (voice) { try { voice.disable(); } catch (e) {} }
   handleRoomEnded();
+  setShareStatus("已退出房间", false);
+  hideAllPanels();
+}
+
+// 解散房间：当前管理员广播 bye，全家离场
+function dissolveRoom() {
+  if (signaling) { try { signaling.send({ type: "bye" }); } catch (e) {} }
+  if (voice) { try { voice.disable(); } catch (e) {} }
+  handleRoomEnded();
+  setShareStatus("已解散房间", false);
+  hideAllPanels();
 }
 
 // ============================================================
@@ -407,6 +455,8 @@ async function onSignalMesh(msg) {
     const them = msg.id; if (!them || them === friendId) return;
     if (mode === "view" && msg.host) adoptHost(them);   // 记录分享者（host），转主定位标
     if (meshPeers.has(them)) return;                    // 已连接/连接中
+    // 维护名义加入顺序（仅记录，管理员判定用 min-nodeId，确定性一致）
+    if (!adminOrder.includes(them)) adminOrder.push(them);
     if (mode === "share") {
       // host 总是主动 offer（兼容旧版查看端只等 host offer 的行为；双方同发 offer 由 glare 兜底）
       createMeshPeer(them, true);
@@ -467,18 +517,24 @@ function handleRoomEnded() {
   const wasShare = mode === "share";
   mode = "idle";
   hostId = null;
+  roomAdminId = null;
+  adminOrder = [];
+  const roomCode = shareCode || viewCode || "";
+  shareCode = null;
+  viewCode = null;
+  $("dissolveBtn").style.display = "none";
+  $("stopBtn").style.display = "none";
+  $("code").textContent = "------";
+  $("qrcode").src = "";
   if (wasShare) {
-    shareCode = null;
-    setShareStatus("已停止共享", false);
-    $("stopBtn").style.display = "none";
-    $("code").textContent = "------";
-    $("qrcode").src = "";
+    setShareStatus("已退出房间", false);
     hideAllPanels();
-  } else {
-    viewCode = null;
-    setViewStatus("对方已结束共享，可关闭", false);
+  } else if (roomCode) {
+    setViewStatus("已退出房间", false);
     $("viewPanel").style.display = "none";
     hideOverlay();
+  } else {
+    hideAllPanels();
   }
   revertToMe();
 }
@@ -518,6 +574,7 @@ function handlePeerData(peerId, m) {
 // 根据当前是否有成员已直连，点亮/熄灭右上角指示灯（有人真正加入才亮，同安卓端）
 function updateConnectedStatus() {
   setIndicator(meshAnyConnected());
+  refreshDissolveBtn();   // 成员进出会影响管理员判定，刷新「解散房间」显隐
 }
 
 // 注意向后兼容别名：外部模块可能仍引用旧的 sharePeers/closeSharePeer/broadcastPeerLeave
@@ -872,24 +929,26 @@ async function joinView() {
 
   try {
     signaling = await connectSignaling("hereiam:" + code, onSignalMesh);
-    setViewStatus("等待好友分享…", false);
     signaling.send({ type: "join", id: friendId });
     startJoinTimer();   // mesh 成员发现：周期广播 join，与房间内所有成员两两直连
-    hostId = null;      // 等待 host（分享者）的 join/profile 带 host:true 来识别
-    updateUserSelector();   // 进入查看模式 → 显示「停止查看」项
+    // 加入者默认非管理员；管理员权由房间广播确认（加入顺序最早的成员）
+    roomAdminId = null;
+    adminOrder = [];
+    setRoomStatus("已加入……正在同步成员状态…", false);
+    showRoomPanel();     // 统一房间面板
+    updateUserSelector();
   } catch (e) {
     setViewStatus("信令连接失败，请检查网络", false);
   }
 }
 
-// 停止查看：发送 leave、断开所有连接、移除定位标、回到空闲（mesh 统一清理）
+// 退出房间：发送 leave、断开所有连接、移除定位标、回到空闲（mesh 统一清理）
 function stopView() {
-  // 先发 leave 通知房间内其他成员「我已退出」，对方清理连接并移除我的定位标
   if (signaling) { try { signaling.send({ type: "leave", id: friendId }); } catch (e) {} }
   // 关闭语音对讲（停麦克风 + 广播收声给对端）
   if (voice) { try { voice.disable(); } catch (e) {} }
   handleRoomEnded();
-  setViewStatus("已停止查看", false);
+  setViewStatus("已退出房间", false);
   $("viewPanel").style.display = "none";
   hideOverlay();
 }
@@ -1594,16 +1653,16 @@ function bindEvents() {
   $("optShare").addEventListener("click", startShare);
   $("optView").addEventListener("click", startView);
 
-  // 分享面板
+  // 房间面板（创建者/加入者统一）
   $("shareClose").addEventListener("click", () => { $("sharePanel").style.display = "none"; hideOverlay(); });
-  $("code").addEventListener("click", () => { if (shareCode) copyText(shareCode); });
-  $("copyBtn").addEventListener("click", () => { if (shareCode) copyText(shareCode); });
-  $("linkBtn").addEventListener("click", () => { if (shareCode) copyText(shareLink(shareCode)); });
+  $("code").addEventListener("click", () => { const c = shareCode || viewCode; if (c) copyText(c); });
+  $("copyBtn").addEventListener("click", () => { const c = shareCode || viewCode; if (c) copyText(c); });
+  $("linkBtn").addEventListener("click", () => { const c = shareCode || viewCode; if (c) copyText(shareLink(c)); });
+  $("dissolveBtn").addEventListener("click", dissolveRoom);
   $("stopBtn").addEventListener("click", stopShare);
 
-  // 查看面板
+  // 加入面板
   $("viewClose").addEventListener("click", () => { $("viewPanel").style.display = "none"; hideOverlay(); });
-  $("stopViewBtn").addEventListener("click", stopView);
   $("viewCode").addEventListener("input", (e) => {
     $("joinBtn").disabled = e.target.value.trim().length !== 6;
   });
@@ -1613,9 +1672,9 @@ function bindEvents() {
   window.addEventListener("beforeunload", () => {
     if (myWatchId != null) navigator.geolocation.clearWatch(myWatchId);
     if (joinTimer) clearInterval(joinTimer);
-    // 尽力通知房间内其他成员我已退出（host 发 bye 解散；成员发 leave；关页时 Ably 发送不一定来得及，对端另有超时兜底）
+    // 尽力通知房间内其他成员我已退出（成员发 leave，房间保留；关页时 Ably 发送不一定来得及，对端另有超时兜底）
     if (signaling) {
-      try { signaling.send({ type: mode === "share" ? "bye" : "leave", id: friendId }); } catch (e) {}
+      try { signaling.send({ type: "leave", id: friendId }); } catch (e) {}
     }
     meshPeers.forEach((p) => { try { if (p.pc) p.pc.close(); } catch (e) {} });
     meshPeers.clear();
