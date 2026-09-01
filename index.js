@@ -52,14 +52,15 @@ let driverWdp = null, driverStroke = null; // 分享者定位标
 let myWdp = null, myStroke = null;         // 自己定位标
 
 // 本好友会话唯一 ID（查看模式用）。
-// 持久化到 sessionStorage：刷新页面后仍是同一 ID，分享端据此识别「同一个浏览器用户」，
-// 复用（替换）旧连接而不是另建一条，避免刷新重进后分享端出现重复的定位标。
+// nodeId：跨平台统一格式 hereiam_<时间36零填充8>_<随机6>（时间在前、不分平台/角色），
+// 保证 min-nodeId≈加入时间最早（管理员按加入顺序移交）。
+// 每次进入房间都重新生成（refreshNodeId），避免重复进房沿用旧 id 抢回管理员权限。
 let friendId = null;
-try { friendId = sessionStorage.getItem("hereiam_client_id"); } catch (e) {}
-if (!friendId) {
-  friendId = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
-  try { sessionStorage.setItem("hereiam_client_id", friendId); } catch (e) {}
+function refreshNodeId() {
+  friendId = "hereiam_" + Date.now().toString(36).padStart(8, "0") + "_" + Math.floor(100000 + Math.random() * 900000).toString();
+  if (typeof voice !== "undefined" && voice) voice.friendId = friendId;   // 语音重协商 offer 用同一 id
 }
+refreshNodeId();
 
 // ========== 顶部用户选择器 / 定位按钮状态（同安卓 App） ==========
 // 当前跟随目标："me"=自己位置居中 / "friend"=对端好友位置居中 / null=不跟随
@@ -291,6 +292,7 @@ function shareLink(code) {
 }
 
 async function initShare(code) {
+  refreshNodeId();          // 每次进房重新生成 nodeId，避免沿用旧 id 抢回管理员
   mode = "share";
   hostId = friendId;   // 我是房间创建者（host）
   $("code").textContent = code;
@@ -303,7 +305,7 @@ async function initShare(code) {
   $("stopBtn").style.display = "block";
 
   try {
-    signaling = await connectSignaling("hereiam:" + code, onSignalMesh);
+    signaling = await connectSignaling("hereiam:" + code, onSignalMesh, friendId);
     setShareStatus("等待好友打开链接加入…", false);
     startJoinTimer();   // 周期广播 join（host:true），让成员发现我并与之直连
     // 指示灯在有人真正加入并建立点对点直连后才点亮（由 updateConnectedStatus 控制），
@@ -341,7 +343,7 @@ function stopJoinTimer() {
   if (joinTimer) { clearInterval(joinTimer); joinTimer = null; }
 }
 
-// 为 peerId 创建连接。offerer=true 表示由我方发起 offer；false 表示被动应答对方
+// 为 peerId 创建连接。offerer=true 表示由我方发起 offer 并主动建数据通道；false 被动应答（数据通道由对方推送）
 function createMeshPeer(peerId, offerer) {
   closeMeshPeer(peerId);
   const p = { peerId, pc: null, dc: null, connected: false, name: null, avatarData: null,
@@ -350,13 +352,20 @@ function createMeshPeer(peerId, offerer) {
   p.pc = c;
   // 接收该对端的音频轨（mesh 多路语音：voice 按 pc 分路播放）
   if (voice) c.ontrack = (e) => { try { voice.handleRemoteTrack(e); } catch (err) {} };
-  const dc2 = c.createDataChannel("location");
-  p.dc = dc2;
-  dc2.onopen = () => { p.connected = true; onPeerOpen(p); };
-  dc2.onmessage = (ev) => {
-    let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
-    handlePeerData(peerId, m);
+  // answerer：数据通道由 offerer 创建并推送过来（与安卓端一致，避免双方都建通道 ID 冲突）
+  c.ondatachannel = (ev) => {
+    const dc = ev.channel;
+    p.dc = dc;
+    dc.onopen = () => { p.connected = true; onPeerOpen(p); };
+    dc.onmessage = (e) => { let m; try { m = JSON.parse(e.data); } catch (err) { return; } handlePeerData(peerId, m); };
   };
+  // offerer：主动创建数据通道（negotiated=false，仅本端建，对端经 ondatachannel 接收）
+  if (offerer) {
+    const dc2 = c.createDataChannel("location");
+    p.dc = dc2;
+    dc2.onopen = () => { p.connected = true; onPeerOpen(p); };
+    dc2.onmessage = (ev) => { let m; try { m = JSON.parse(ev.data); } catch (e) { return; } handlePeerData(peerId, m); };
+  }
   c.onicecandidate = (e) => {
     if (e.candidate && signaling) {
       try { signaling.send({ type: "candidate", candidate: e.candidate, id: friendId, to: peerId }); } catch (err) {}
@@ -468,10 +477,10 @@ async function onSignalMesh(msg) {
     if (meshPeers.has(them)) return;                    // 已连接/连接中
     // 维护名义加入顺序（仅记录，管理员判定用 min-nodeId，确定性一致）
     if (!adminOrder.includes(them)) adminOrder.push(them);
-    if (mode === "share") {
-      // host 总是主动 offer（兼容旧版查看端只等 host offer 的行为；双方同发 offer 由 glare 兜底）
-      createMeshPeer(them, true);
-    } else if (them < friendId) {
+    // mesh 协调：id 字典序大者发起 offer，小者被动应答（与安卓端 host/viewer 完全一致）。
+    // 若 host 无条件主动 offer，会与「id 小者主动 offer」的加入端同时发起 offer（glare），
+    // 双方各自放弃本地并等对方，连接无法建立。
+    if (them < friendId) {
       createMeshPeer(them, true);  // 我 offer；否则等对方 offer（join 周期广播兜底）
     }
   } else if (msg.type === "offer") {
@@ -932,6 +941,7 @@ function startLocationStream() {
 //  查看逻辑（查看者端）
 // ============================================================
 async function joinView() {
+  refreshNodeId();          // 每次进房重新生成 nodeId，避免沿用旧 id 抢回管理员
   const code = $("viewCode").value.trim();
   if (code.length !== 6) return;
   mode = "view";
@@ -941,7 +951,7 @@ async function joinView() {
   setViewStatus("正在连接…", false);
 
   try {
-    signaling = await connectSignaling("hereiam:" + code, onSignalMesh);
+    signaling = await connectSignaling("hereiam:" + code, onSignalMesh, friendId);
     signaling.send({ type: "join", id: friendId });
     startJoinTimer();   // mesh 成员发现：周期广播 join，与房间内所有成员两两直连
     // 加入者默认非管理员；管理员权由房间广播确认（加入顺序最早的成员）

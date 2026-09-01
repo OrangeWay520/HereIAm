@@ -6,9 +6,11 @@
 //        （说明：连接建立时的握手仍经 Ably，但只含连接参数、不含位置）
 // ============================================================
 
-function connectSignaling(channelName, onMessage) {
+function connectSignaling(channelName, onMessage, clientId) {
   return new Promise((resolve, reject) => {
-    const ably = new Ably.Realtime(CONFIG.ablyKey);
+    const options = { key: CONFIG.ablyKey };
+    if (clientId) options.clientId = clientId;
+    const ably = new Ably.Realtime(options);
     ably.connection.once("connected", () => {
       const channel = ably.channels.get(channelName);
       channel.subscribe((msg) => {
@@ -22,10 +24,26 @@ function connectSignaling(channelName, onMessage) {
           console.warn("无法解析信令消息", e);
         }
       });
+      // presence：本端进入房间 presence（clientId=nodeId），供加入端「房间是否存在/是否在线」判定。
+      // 每 15s 发一次 presence.update() 心跳刷新自己的时间戳（对端据此判定本端在线）。
+      // 不可用时静默降级，仍由 join 心跳判定房间。
+      let presenceTimer = 0;
+      try {
+        channel.presence.enter();
+        presenceTimer = setInterval(() => {
+          try { channel.presence.update(); } catch (e) {}
+        }, 15000);
+      } catch (e) {
+        // presence 不可用（key 无权限等）：仍由 join 心跳判定房间
+      }
       resolve({
         ably,
         send: (obj) => channel.publish("signal", JSON.stringify(obj)),
-        close: () => ably.close(),
+        close: () => {
+          if (presenceTimer) clearInterval(presenceTimer);
+          try { channel.presence.leave(); } catch (e) {}
+          ably.close();
+        },
       });
     });
     ably.connection.once("failed", (err) => {
